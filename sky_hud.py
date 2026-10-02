@@ -202,6 +202,7 @@ class SoundBus:
 
 class HudApp:
     CFG_FILE = os.path.join(APP_DIR, "sky_hud_config.json")
+    CUSTOM_SONG_DIR = os.path.join(APP_DIR, "songs", "User Songs")
 
     def __init__(self, root, start_song=None):
         self.root = root
@@ -455,8 +456,9 @@ class HudApp:
         if self._catalog_cache is None:
             entries = []
             # Exclude metadata and VSRG; those are not Sky songNotes files.
-            for folder in ("Songs", "Multi-Sheet Songs"):
-                root = os.path.join(APP_DIR, "songs", folder)
+            roots = [os.path.join(APP_DIR, "songs", folder) for folder in ("Songs", "Multi-Sheet Songs")]
+            roots.append(self.CUSTOM_SONG_DIR)
+            for root in roots:
                 for base, _, files in os.walk(root):
                     for name in files:
                         if name.lower().endswith((".txt", ".json")):
@@ -470,6 +472,34 @@ class HudApp:
         entries = [e for e in self._catalog_cache if not needle or needle in e[0].casefold()]
         return sorted(entries, key=lambda e: (song_path_key(e[1]) not in self.favorites,
                                               e[0].casefold(), e[1]))
+
+    def import_song_file(self, path):
+        """Validate before copying; never overwrite a different song with the same name."""
+        name = os.path.basename(path)
+        stem, ext = os.path.splitext(name)
+        if ext.lower() not in (".txt", ".json"):
+            raise ValueError("Выберите песню Sky в формате .txt или .json")
+        with open(path, "rb") as source:
+            content = source.read()
+        song = parse_song(content.decode("utf-8-sig"), name)
+        if not any(p["events"] for p in song["parts"]):
+            raise ValueError("В песне нет подходящих нот")
+        os.makedirs(self.CUSTOM_SONG_DIR, exist_ok=True)
+        number = 1
+        while True:
+            filename = name if number == 1 else "%s (%d)%s" % (stem, number, ext)
+            dest = os.path.join(self.CUSTOM_SONG_DIR, filename)
+            try:
+                with open(dest, "xb") as target:
+                    target.write(content)
+                break
+            except FileExistsError:
+                with open(dest, "rb") as existing:
+                    if existing.read() == content:
+                        break
+                number += 1
+        self._catalog_cache = None
+        return dest
 
     def toggle_favorite(self, path):
         key = song_path_key(path)
@@ -488,14 +518,24 @@ class HudApp:
         win.attributes("-topmost", True)
         head = tk.Frame(win, bg="#182733", padx=18, pady=16)
         head.pack(fill="x")
-        tk.Label(head, text="Каталог нот", fg="#f5efdf", bg="#182733",
-                 font=("Segoe UI", 18)).pack(anchor="w")
+        title_row = tk.Frame(head, bg="#182733")
+        title_row.pack(fill="x")
+        tk.Label(title_row, text="Каталог нот", fg="#f5efdf", bg="#182733",
+                 font=("Segoe UI", 18)).pack(side="left")
+        win.import_button = tk.Button(title_row, text="Загрузить свою песню",
+                                       command=lambda: upload(), font=("Segoe UI", 10),
+                                       bg="#283945", fg="#f5efdf", activebackground="#3e5864",
+                                       activeforeground="#ffffff", relief="flat", padx=12, pady=7)
+        win.import_button.pack(side="right")
         tk.Label(head, text="★ — избранное всегда сверху · двойной щелчок — открыть",
                  fg="#b8c6c9", bg="#182733", font=("Segoe UI", 9)).pack(anchor="w", pady=(5,12))
         q = tk.StringVar()
         ent = tk.Entry(head, textvariable=q, bg="#283945", fg="#f5efdf",
                        insertbackground="#f5efdf", relief="flat", font=("Segoe UI", 11))
         ent.pack(fill="x", ipady=8)
+        win.import_status = tk.Label(head, text="", bg="#182733", fg="#b8c6c9",
+                                     anchor="w", wraplength=560, font=("Segoe UI", 9))
+        win.import_status.pack(fill="x", pady=(5, 0))
         body = tk.Frame(win, bg="#182733", padx=18, pady=14)
         body.pack(fill="both", expand=True)
         style = ttk.Style(win)
@@ -520,6 +560,26 @@ class HudApp:
             for i, (name, path, size) in enumerate(win.catalog_arr):
                 star = "★" if song_path_key(path) in self.favorites else "☆"
                 tree.insert("", "end", iid=str(i), values=(star, os.path.splitext(name)[0], "%d KB" % round(size/1024)))
+
+        def upload():
+            path = filedialog.askopenfilename(
+                parent=win, title="Загрузить свою песню в каталог",
+                filetypes=[("Песни Sky", "*.txt *.json")])
+            if not path:
+                return
+            try:
+                dest = self.import_song_file(path)
+                self.load_song_file(dest)
+                q.set("")
+                for i, entry in enumerate(win.catalog_arr):
+                    if entry[1] == dest:
+                        tree.selection_set(str(i))
+                        tree.see(str(i))
+                        break
+                win.import_status.config(text="Добавлено: " + os.path.basename(dest), fg="#b8c6c9")
+                self.status("Своя песня добавлена · нажмите «Старт», чтобы играть")
+            except Exception as e:
+                win.import_status.config(text="Ошибка: %s" % e, fg="#ff9999")
 
         def favorite(event):
             iid = tree.identify_row(event.y)

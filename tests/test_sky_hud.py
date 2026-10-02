@@ -208,6 +208,63 @@ class HudTests(unittest.TestCase):
         self.assertNotEqual(option(0, 2, "outline"), C["next"])
         self.assertEqual(float(option(0, 2, "width")), 1)
 
+    def test_upload_button_imports_song_into_persistent_catalog(self):
+        source = Path(self.tmp.name) / "Моя песня.txt"
+        content = '{"name":"Моя песня","songNotes":[{"time":0,"key":"1Key3"}]}'
+        source.write_text(content, encoding="utf-8-sig")
+        custom = Path(self.tmp.name) / "User Songs"
+        with patch.object(hud.HudApp, "CUSTOM_SONG_DIR", str(custom), create=True):
+            win = self.app.open_catalog()
+            win.geometry("620x700+10000+10000")
+            with patch.object(hud.filedialog, "askopenfilename", return_value=str(source)) as dialog:
+                win.import_button.invoke()
+            self.assertEqual(dialog.call_args.kwargs["parent"], win)
+            imported = custom / source.name
+            self.assertTrue(imported.exists())
+            self.assertEqual(imported.read_bytes(), source.read_bytes())
+            self.assertTrue(any(e[1] == str(imported) for e in win.catalog_arr))
+            self.assertEqual(self.app.song["name"], "Моя песня")
+            self.assertIsNone(self.app.run)
+            self.app._catalog_cache = None
+            self.assertTrue(any(e[1] == str(imported) for e in self.app.catalog_entries("Моя")))
+            win.destroy()
+
+    def test_import_keeps_same_name_songs_and_reuses_identical_copy(self):
+        first = Path(self.tmp.name) / "first" / "song.txt"
+        second = Path(self.tmp.name) / "second" / "song.txt"
+        first.parent.mkdir()
+        second.parent.mkdir()
+        first.write_text('{"name":"one","songNotes":[{"time":0,"key":"1Key0"}]}', encoding="utf-8")
+        second.write_text('{"name":"two","songNotes":[{"time":0,"key":"1Key1"}]}', encoding="utf-8")
+        custom = Path(self.tmp.name) / "User Songs"
+        with patch.object(hud.HudApp, "CUSTOM_SONG_DIR", str(custom)):
+            one = self.app.import_song_file(str(first))
+            two = self.app.import_song_file(str(second))
+            self.assertNotEqual(one, two)
+            self.assertEqual(Path(one).read_bytes(), first.read_bytes())
+            self.assertEqual(Path(two).read_bytes(), second.read_bytes())
+            self.assertEqual(self.app.import_song_file(str(first)), one)
+            self.assertEqual(self.app.import_song_file(one), one)
+            self.assertEqual(len(list(custom.iterdir())), 2)
+
+    def test_upload_cancel_or_invalid_file_leaves_song_unchanged(self):
+        custom = Path(self.tmp.name) / "User Songs"
+        invalid = Path(self.tmp.name) / "bad.txt"
+        invalid.write_text("not a song", encoding="utf-8")
+        original = self.app.song
+        with patch.object(hud.HudApp, "CUSTOM_SONG_DIR", str(custom)):
+            win = self.app.open_catalog()
+            win.geometry("620x700+10000+10000")
+            with patch.object(hud.filedialog, "askopenfilename", return_value=""):
+                win.import_button.invoke()
+            self.assertIs(self.app.song, original)
+            with patch.object(hud.filedialog, "askopenfilename", return_value=str(invalid)):
+                win.import_button.invoke()
+            self.assertIs(self.app.song, original)
+            self.assertFalse(custom.exists())
+            self.assertIn("Ошибка", win.import_status.cget("text"))
+            win.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()
