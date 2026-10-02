@@ -1,0 +1,19 @@
+# Derived executables, archives and build output
+*.exe
+*.zip
+/build/
+/dist/
+/__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# External sheet collection and portable snapshot (kept on disk)
+/songs/
+/notes/
+
+# Local preferences and captures
+/sky_hud_config.json
+*.png
+*.log
+/.venv/
+/.pytest_cache/
