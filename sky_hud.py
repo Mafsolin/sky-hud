@@ -958,10 +958,10 @@ class HudApp:
     # ---------------------------------------------------------- отрисовка HUD
     # Три клавиатуры: текущий ход и два следующих, без дублирующих подписей.
     HUD_COLORS = {
-        "transparent": "#0b1230", "panel": "#182733", "edge": "#52616c",
-        "key": "#283945", "key_edge": "#60717a", "text": "#f5efdf",
-        "muted": "#b8c6c9", "now": "#efd4a0", "next": "#9bc9d2",
-        "ink": "#26333b", "hit": "#f6ead0", "wrong": "#d7968d",
+        "transparent": "#0b1230", "panel": "#101a2a", "edge": "#485b70",
+        "key": "#1d2b3e", "key_edge": "#5c738a", "text": "#ffffff",
+        "muted": "#d3deeb", "now": "#ffcf66", "next": "#6edaff",
+        "ink": "#101722", "hit": "#fff0be", "wrong": "#ff9999",
     }
 
     def _redraw(self):
@@ -1003,26 +1003,21 @@ class HudApp:
         c.delete("all")
         s = L["s"]
         it: dict[str, Any] = {"body": [[None] * 15 for _ in range(3)],
-              "labels": [[None] * 15 for _ in range(3)],
-              "rings": [[None] * 15 for _ in range(3)]}
+                              "labels": [[None] * 15 for _ in range(3)]}
         x, yp = L["pad"], L["pad"]
         for p in range(3):
-            c.create_polygon(rr_points(x, yp, x + L["panel_w"], yp + L["panel_h"], int(18 * s)),
-                             smooth=True, fill=C["panel"], outline=C["edge"], width=1)
+            c.create_rectangle(x, yp, x + L["panel_w"], yp + L["panel_h"],
+                               fill=C["panel"], outline=C["edge"], width=1)
             for idx in range(15):
                 row, col = divmod(idx, 5)
                 kx = x + L["padp"] + col * (L["cw"] + L["g"])
                 ky = yp + L["padp"] + row * (L["ch"] + L["g"])
-                it["body"][p][idx] = c.create_polygon(
-                    rr_points(kx, ky, kx + L["cw"], ky + L["ch"], max(3, int(9 * s))),
-                    smooth=True, fill=C["key"], outline=C["key_edge"], width=1)
-                # Тонкое кольцо напоминает клавиши инструмента Sky; без орнаментов.
-                r = int(12 * s)
+                it["body"][p][idx] = c.create_rectangle(
+                    kx, ky, kx + L["cw"], ky + L["ch"],
+                    fill=C["key"], outline=C["key_edge"], width=1)
                 cx, cy = kx + L["cw"] / 2, ky + L["ch"] / 2
-                it["rings"][p][idx] = c.create_oval(cx-r, cy-r, cx+r, cy+r,
-                                                    outline=C["edge"], width=1)
                 it["labels"][p][idx] = c.create_text(
-                    cx, cy, text=CODES[idx], font=("Segoe UI", max(10, int(13 * s))), fill=C["text"])
+                    cx, cy, text=CODES[idx], font=("Segoe UI", max(11, int(16 * s)), "bold"), fill=C["text"])
             x += L["panel_w"] + L["sp"]
         bx1, bx2 = L["pad"], L["w"] - L["pad"]
         bar_y = L["h"] - L["pad"]
@@ -1034,7 +1029,7 @@ class HudApp:
         it["time"] = c.create_text(bx2, bar_y-int(7*s), anchor="se", text="",
                                    font=("Segoe UI", max(8, int(10*s))), fill=C["muted"])
         self._it = it
-        self._last_style: list[tuple[str, str, str, str] | None] = [None] * 45
+        self._last_style: list[tuple[str, str, str] | None] = [None] * 45
         self._last_frac, self._last_time = None, None
 
     def _cursor(self, tl, now_ms):
@@ -1061,25 +1056,24 @@ class HudApp:
         for p in range(3):
             active = {n["key"] for n in events[p]["notes"]} if p < len(events) else set()
             for idx in range(15):
-                fill, edge, text, ring = C["key"], C["key_edge"], C["text"], C["edge"]
+                fill, edge, text = C["key"], C["key_edge"], C["text"]
                 if idx in active:
                     fill = C["now"] if p == 0 else C["next"]
-                    edge, text, ring = C["text"], C["ink"], C["ink"]
+                    edge, text = C["text"], C["ink"]
                 if p == 0:
                     if step_mode and idx in r["step_done"]:
-                        fill, edge, text, ring = C["hit"], C["text"], C["ink"], C["ink"]
+                        fill, edge, text = C["hit"], C["text"], C["ink"]
                     fl = self.flash.get(idx)
                     if fl and pf < fl[1]:
                         fill = C["hit"] if fl[0] == "hit" else C["wrong"]
-                        edge, text, ring = C["text"], C["ink"], C["ink"]
+                        edge, text = C["text"], C["ink"]
                     elif idx in self.pressed_key:
                         edge = C["text"]
-                style = fill, edge, text, ring
+                style = fill, edge, text
                 k = p*15 + idx
                 if self._last_style[k] != style:
                     c.itemconfig(it["body"][p][idx], fill=fill, outline=edge)
                     c.itemconfig(it["labels"][p][idx], fill=text)
-                    c.itemconfig(it["rings"][p][idx], outline=ring)
                     self._last_style[k] = style
         frac, ts = 0.0, ""
         if r:

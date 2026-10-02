@@ -151,6 +151,31 @@ class HudTests(unittest.TestCase):
         self.assertEqual(self.app.panel.winfo_x(), 3273)
         self.assertEqual(self.app.panel.winfo_y(), 56)
 
+    def test_hud_uses_plain_rectangles_without_decorative_rings(self):
+        self.app._build_items()
+        shapes = [self.app.cv.type(i) for i in self.app.cv.find_all()]
+        self.assertNotIn("oval", shapes)
+        self.assertNotIn("polygon", shapes)
+        self.assertEqual(shapes.count("rectangle"), 48)
+
+    def test_key_labels_are_large_bold_and_high_contrast(self):
+        import tkinter.font as tkfont
+        self.app.scale = 1.0
+        self.app._build_items()
+        self.app._animate_items()
+        item = self.app._it["labels"][0][0]
+        font = tkfont.Font(root=self.root, font=self.app.cv.itemcget(item, "font"))
+        self.assertGreaterEqual(font.actual("size"), 16)
+        self.assertEqual(font.actual("weight"), "bold")
+        def luminance(color):
+            rgb = [int(color[i:i+2], 16)/255 for i in (1, 3, 5)]
+            rgb = [v/12.92 if v <= .04045 else ((v+.055)/1.055)**2.4 for v in rgb]
+            return sum(v*w for v, w in zip(rgb, (.2126, .7152, .0722)))
+        C = self.app.HUD_COLORS
+        for background, foreground in ((C["key"], C["text"]), (C["now"], C["ink"]), (C["next"], C["ink"])):
+            lo, hi = sorted((luminance(background), luminance(foreground)))
+            self.assertGreaterEqual((hi+.05)/(lo+.05), 7.0)
+
 
 if __name__ == "__main__":
     unittest.main()
