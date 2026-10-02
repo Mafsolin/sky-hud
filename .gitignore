@@ -3,6 +3,7 @@
 *.zip
 /build/
 /dist/
+/backups/
 /__pycache__/
 **/__pycache__/
 *.py[cod]

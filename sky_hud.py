@@ -25,7 +25,8 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog
+from typing import Any
+from tkinter import filedialog, ttk
 import winsound
 
 APP_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
@@ -146,6 +147,18 @@ def build_timeline(song, part_ids):
 
 
 # ---------------------------------------------------------------- HUD
+def song_path_key(path):
+    """Portable identity inside APP_DIR; absolute identity for external files."""
+    absolute = os.path.abspath(path)
+    try:
+        relative = os.path.relpath(absolute, APP_DIR)
+        if relative != ".." and not relative.startswith(".." + os.sep):
+            return relative.replace("\\", "/")
+    except ValueError:
+        pass
+    return absolute.replace("\\", "/")
+
+
 def blend(base, part, w):
     return tuple(int(base[i] + (part[i] - base[i]) * max(0.0, min(1.0, w))) for i in range(3))
 
@@ -204,9 +217,14 @@ class HudApp:
         parts_cfg = self.cfg.get("parts")
         self.part_sel = None if parts_cfg is None else set(parts_cfg)
         self.song = None
+        self.song_path = None
+        self.preview_tl = None
         self.run = None
         self.flash = {}            # idx -> (kind, perf_expire)
         self.pressed_key = set()
+        self.hud_hidden = bool(self.cfg.get("hud_hidden", False))
+        self.favorites = set(self.cfg.get("favorites") or [])
+        self._catalog_cache = None
 
         # ---- окно HUD: поверх всего, без рамки, без фокуса, клики проходят сквозь
         root.title("Sky HUD")
@@ -217,7 +235,7 @@ class HudApp:
             root.wm_attributes("-transparentcolor", "#0b1230")
         except Exception:
             pass
-        self.cv = tk.Canvas(root, highlightthickness=0, bd=0)
+        self.cv = tk.Canvas(root, width=1, height=1, highlightthickness=0, bd=0)
         self.cv.pack()
         root.update_idletasks()
         self._make_click_through()
@@ -229,29 +247,16 @@ class HudApp:
         self.panel.attributes("-topmost", True)
         self.panel.protocol("WM_DELETE_WINDOW", self.quit)
         self._build_panel()
-        # Панель управления всегда открывается на текущем мониторе HUD.
-        root.update_idletasks()
-        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-        pw, ph = self.panel.winfo_reqwidth(), self.panel.winfo_reqheight()
-        rx, ry, rw, rh = self.geom()
-        px = rx + rw + 14
-        py = max(20, ry)
-        if px + pw > sw:
-            px = max(10, rx - pw - 14)
-        if px + pw > sw:
-            px = max(10, (sw - pw) // 2)
-        if py + ph > sh:
-            py = max(10, sh - ph - 40)
-        self.panel.geometry("+%d+%d" % (px, py))
+        self.place_panel()
 
         if start_song is not None:
             self.set_song(start_song)
+        else:
+            self.restore_song()
 
         self.root.after(15, self._poll_keys)
         self._it = None
         self._need_rebuild = True
-        self._last_fill = None
-        self._last_out = None
         self._last_frac = 0.0
         self._last_time = None
         self.root.after(33, self._frame)
@@ -259,8 +264,29 @@ class HudApp:
         self.root.after(400, self._save_cfg_debounced)
         self._click_through = self._make_click_through()
         self._t0 = time.perf_counter()
+        if self.hud_hidden:
+            self.root.withdraw()
 
     # ---------------------------------------------------------- окно/стили
+    def place_panel(self):
+        # Saved screen coordinates may belong to a secondary monitor.
+        self.root.update_idletasks()
+        px, py = self.cfg.get("px"), self.cfg.get("py")
+        if px is not None and py is not None:
+            self.panel.geometry("%+d%+d" % (int(px), int(py)))
+            return
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        pw, ph = self.panel.winfo_reqwidth(), self.panel.winfo_reqheight()
+        rx, ry, rw, rh = self.geom()
+        px, py = rx + rw + 14, max(20, ry)
+        if px + pw > sw:
+            px = max(10, rx - pw - 14)
+        if px + pw > sw:
+            px = max(10, (sw - pw) // 2)
+        if py + ph > sh:
+            py = max(10, sh - ph - 40)
+        self.panel.geometry("%+d%+d" % (px, py))
+
     def _make_click_through(self):
         try:
             hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
@@ -311,7 +337,10 @@ class HudApp:
             "px": px, "py": py,
             "scale": self.scale, "alpha": self.alpha, "tempo": self.tempo,
             "mode": self.mode, "metro": self.metro_on, "sound": self.sound_on,
-            "loop": self.loop_on, "parts": sorted(self.part_sel),
+            "loop": self.loop_on, "parts": sorted(self.part_sel or []),
+            "hud_hidden": self.hud_hidden,
+            "favorites": sorted(self.favorites),
+            "last_song": self.song_path,
         }
         try:
             with open(self.CFG_FILE, "w", encoding="utf-8") as f:
@@ -332,6 +361,9 @@ class HudApp:
         tk.Button(f, text="Каталог нот", command=self.open_catalog).pack(side="left", padx=2)
         self.lb_go = tk.Button(f, text="▶ Старт", width=8, command=self.toggle_run)
         self.lb_go.pack(side="left")
+        self.lb_hide = tk.Button(f, text="Показать HUD" if self.hud_hidden else "Скрыть HUD полностью",
+                                 command=self.toggle_hud)
+        self.lb_hide.pack(side="left", padx=(8, 0))
         self.mode_btns = {}
 
         self.lb_song = tk.Label(p, text="—", anchor="w", font=("Segoe UI", 9, "bold"))
@@ -395,7 +427,6 @@ class HudApp:
         tk.Button(f4, text="✕ Закрыть", command=self.quit).pack(side="right")
 
         self.lb_stats = tk.Label(p, text="", fg="#0a0", font=("Segoe UI", 9))
-        self.lb_stats.pack(fill="x", padx=8)
         self.lb_status = tk.Label(p, text="Загрузите файл песни (.txt/.json) или нажмите «Пример»",
                                   fg="#888", anchor="w", wraplength=430, justify="left",
                                   font=("Segoe UI", 8))
@@ -420,48 +451,116 @@ class HudApp:
             for path in self.catalog_paths:
                 self.catalog_list.insert("end", os.path.basename(path))
 
+    def catalog_entries(self, query=""):
+        if self._catalog_cache is None:
+            entries = []
+            # Exclude metadata and VSRG; those are not Sky songNotes files.
+            for folder in ("Songs", "Multi-Sheet Songs"):
+                root = os.path.join(APP_DIR, "songs", folder)
+                for base, _, files in os.walk(root):
+                    for name in files:
+                        if name.lower().endswith((".txt", ".json")):
+                            path = os.path.join(base, name)
+                            try:
+                                entries.append((name, path, os.path.getsize(path)))
+                            except OSError:
+                                continue
+            self._catalog_cache = entries
+        needle = query.casefold().strip()
+        entries = [e for e in self._catalog_cache if not needle or needle in e[0].casefold()]
+        return sorted(entries, key=lambda e: (song_path_key(e[1]) not in self.favorites,
+                                              e[0].casefold(), e[1]))
+
+    def toggle_favorite(self, path):
+        key = song_path_key(path)
+        if key in self.favorites:
+            self.favorites.remove(key)
+        else:
+            self.favorites.add(key)
+        self.save_cfg()
+
     def open_catalog(self):
         win = tk.Toplevel(self.panel)
         win.title("Sky Notes · каталог")
-        win.geometry("620x700")
-        win.configure(bg="#0b1935")
+        px, py = self.panel.winfo_rootx(), self.panel.winfo_rooty()
+        win.geometry("620x700%+d%+d" % (px, max(20, py-350)))
+        win.configure(bg="#182733")
         win.attributes("-topmost", True)
-        head = tk.Frame(win, bg="#10264a", padx=18, pady=16); head.pack(fill="x")
-        tk.Label(head, text="SKY NOTES", fg="#9cefff", bg="#10264a", font=("Segoe UI", 10, "bold")).pack(anchor="w")
-        tk.Label(head, text="Выбери песню для HUD", fg="#f4ffff", bg="#10264a", font=("Segoe UI", 18, "bold")).pack(anchor="w", pady=(2,10))
+        head = tk.Frame(win, bg="#182733", padx=18, pady=16)
+        head.pack(fill="x")
+        tk.Label(head, text="Каталог нот", fg="#f5efdf", bg="#182733",
+                 font=("Segoe UI", 18)).pack(anchor="w")
+        tk.Label(head, text="★ — избранное всегда сверху · двойной щелчок — открыть",
+                 fg="#b8c6c9", bg="#182733", font=("Segoe UI", 9)).pack(anchor="w", pady=(5,12))
         q = tk.StringVar()
-        bar=tk.Frame(head,bg="#10264a");bar.pack(fill="x")
-        ent=tk.Entry(bar,textvariable=q,bg="#18345c",fg="#f4ffff",insertbackground="#f4ffff",relief="flat",font=("Segoe UI",11));ent.pack(side="left",fill="x",expand=True,ipady=8)
-        body=tk.Frame(win,bg="#0b1935",padx=18,pady=14);body.pack(fill="both",expand=True)
-        listbox_wrap=tk.Frame(body,bg="#10264a");listbox_wrap.pack(fill="both",expand=True)
-        lb=tk.Listbox(listbox_wrap,bg="#10264a",fg="#e9fbff",selectbackground="#3e91a9",selectforeground="#fff",relief="flat",font=("Segoe UI",11),activestyle="none",highlightthickness=1,highlightbackground="#234f70");lb.pack(side="left",fill="both",expand=True)
-        sb=tk.Scrollbar(listbox_wrap,command=lb.yview);sb.pack(side="right",fill="y");lb.config(yscrollcommand=sb.set)
+        ent = tk.Entry(head, textvariable=q, bg="#283945", fg="#f5efdf",
+                       insertbackground="#f5efdf", relief="flat", font=("Segoe UI", 11))
+        ent.pack(fill="x", ipady=8)
+        body = tk.Frame(win, bg="#182733", padx=18, pady=14)
+        body.pack(fill="both", expand=True)
+        style = ttk.Style(win)
+        style.configure("Sky.Treeview", background="#182733", fieldbackground="#182733",
+                        foreground="#f5efdf", rowheight=32, font=("Segoe UI", 11), borderwidth=0)
+        style.map("Sky.Treeview", background=[("selected", "#3e5864")], foreground=[("selected", "#fff8e9")])
+        tree = ttk.Treeview(body, columns=("favorite", "name", "size"), show="", style="Sky.Treeview", selectmode="browse")
+        tree.column("favorite", width=40, stretch=False, anchor="center")
+        tree.column("name", width=420, minwidth=180)
+        tree.column("size", width=70, stretch=False, anchor="e")
+        tree.pack(side="left", fill="both", expand=True)
+        sb = ttk.Scrollbar(body, command=tree.yview)
+        sb.pack(side="right", fill="y")
+        tree.configure(yscrollcommand=sb.set)
+        win.catalog_tree = tree
+
         def refresh():
-            root=os.path.join(APP_DIR,"songs"); needle=q.get().lower().strip(); arr=[]
-            if os.path.isdir(root):
-                for base,_,files in os.walk(root):
-                    for name in files:
-                        if name.lower().endswith((".txt",".json")) and (not needle or needle in name.lower()):
-                            path=os.path.join(base,name); arr.append((name,path,os.path.getsize(path)))
-            arr.sort(key=lambda x:x[0].lower()); lb.delete(0,"end"); win.catalog_arr=arr
-            for name,_,size in win.catalog_arr: lb.insert("end", "  %s   ·   %d KB"%(name,round(size/1024)))
-        def choose(_=None):
-            sel=lb.curselection()
-            if not sel:return
-            path=win.catalog_arr[sel[0]][1]
+            win.catalog_arr = self.catalog_entries(q.get())
+            children = tree.get_children()
+            if children:
+                tree.delete(*children)
+            for i, (name, path, size) in enumerate(win.catalog_arr):
+                star = "★" if song_path_key(path) in self.favorites else "☆"
+                tree.insert("", "end", iid=str(i), values=(star, os.path.splitext(name)[0], "%d KB" % round(size/1024)))
+
+        def favorite(event):
+            iid = tree.identify_row(event.y)
+            if iid and tree.identify_column(event.x) == "#1":
+                path = win.catalog_arr[int(iid)][1]
+                self.toggle_favorite(path)
+                refresh()
+                for i, entry in enumerate(win.catalog_arr):
+                    if entry[1] == path:
+                        tree.selection_set(str(i))
+                        tree.see(str(i))
+                        break
+                return "break"
+
+        def choose(event=None):
+            if event is not None and tree.identify_column(event.x) == "#1":
+                return "break"
+            selected = tree.selection()
+            if not selected:
+                return
+            path = win.catalog_arr[int(selected[0])][1]
             try:
-                with open(path,"r",encoding="utf-8-sig") as f:self.set_song(parse_song(f.read(),os.path.basename(path)))
-                self.status("Загружено: "+os.path.basename(path));win.destroy()
-            except Exception as e:self.status("Ошибка: %s"%e,err=True)
-        q.trace_add("write",lambda *_:refresh());lb.bind("<Double-Button-1>",choose);ent.focus_set();refresh()
+                self.load_song_file(path)
+                self.status("Загружено: " + os.path.basename(path))
+                win.destroy()
+            except Exception as e:
+                self.status("Ошибка: %s" % e, err=True)
+
+        q.trace_add("write", lambda *_: refresh())
+        tree.bind("<Button-1>", favorite)
+        tree.bind("<Double-Button-1>", choose)
+        tree.bind("<Return>", choose)
+        refresh()
+        return win
 
     def _catalog_open(self, _event=None):
         sel = self.catalog_list.curselection()
         if not sel: return
         path = self.catalog_paths[sel[0]]
         try:
-            with open(path, "r", encoding="utf-8-sig") as f:
-                self.set_song(parse_song(f.read(), os.path.basename(path)))
+            self.load_song_file(path)
             self.status("Загружено из каталога: %s" % os.path.basename(path))
         except Exception as e:
             self.status("Ошибка каталога: %s" % e, err=True)
@@ -489,6 +588,17 @@ class HudApp:
         self.root.attributes("-alpha", self.alpha)
         self._save_cfg_debounced()
 
+    def toggle_hud(self):
+        self.hud_hidden = not self.hud_hidden
+        if self.hud_hidden:
+            self.root.withdraw()
+        else:
+            self.root.deiconify()
+            self._click_through = self._make_click_through()
+            self._redraw()
+        self.lb_hide.config(text="Показать HUD" if self.hud_hidden else "Скрыть HUD полностью")
+        self._save_cfg_debounced()
+
     def nudge(self, dx, dy):
         x, y, w, h = self.geom()
         self.root.geometry("+%d+%d" % (x + dx, y + dy))
@@ -502,6 +612,26 @@ class HudApp:
         self._save_cfg_debounced()
 
     # ---------------------------------------------------------- песни
+    def load_song_file(self, path):
+        with open(path, "r", encoding="utf-8-sig") as f:
+            song = parse_song(f.read(), os.path.basename(path))
+        self.set_song(song, source_path=path)
+        self.save_cfg()
+
+    def restore_song(self):
+        last = self.cfg.get("last_song")
+        if last:
+            path = last if os.path.isabs(last) else os.path.join(APP_DIR, last)
+            try:
+                self.load_song_file(path)
+                self.status("Песня восстановлена · нажмите «Старт», чтобы играть с начала")
+                return
+            except (OSError, ValueError, TypeError, IndexError) as e:
+                self.load_demo()
+                self.status("Последняя песня недоступна: %s" % e, err=True)
+                return
+        self.load_demo()
+
     def ask_file(self):
         path = filedialog.askopenfilename(
             title="Файл песни Sky",
@@ -509,15 +639,9 @@ class HudApp:
         if not path:
             return
         try:
-            with open(path, "r", encoding="utf-8-sig") as f:
-                text = f.read()
+            self.load_song_file(path)
         except Exception as e:
-            self.status("Ошибка чтения: %s" % e, err=True)
-            return
-        try:
-            self.set_song(parse_song(text, os.path.basename(path)))
-        except ValueError as e:
-            self.status(str(e), err=True)
+            self.status("Ошибка чтения песни: %s" % e, err=True)
 
     def load_demo(self):
         here = APP_DIR
@@ -525,15 +649,18 @@ class HudApp:
         if os.path.exists(demo):
             try:
                 with open(demo, "r", encoding="utf-8-sig") as f:
-                    self.set_song(parse_song(f.read(), os.path.basename(demo)))
+                    self.set_song(parse_song(f.read(), os.path.basename(demo)), source_path=demo)
                 return
             except Exception:
                 pass
         self.status("Файл «A cruel angel.txt» не найден рядом с программой", err=True)
 
-    def set_song(self, song):
+    def set_song(self, song, source_path=None):
         self.stop()
         self.song = song
+        self.song_path = song_path_key(source_path) if source_path else None
+        self.preview_tl = build_timeline(song, [p["id"] for p in song["parts"]])
+        self.flash.clear()
         ids = [p["id"] for p in song["parts"]]
         if self.part_sel is None:
             self.part_sel = set(ids)
@@ -631,6 +758,7 @@ class HudApp:
         except Exception:
             pass
         self.sound.clear()
+        self.flash.clear()
         if self.mode == "train":
             self.stats_text("0 верно · 0 мимо · 0 лишних · точность —")
         elif self.mode == "step":
@@ -828,10 +956,13 @@ class HudApp:
         self.stats_text(s)
 
     # ---------------------------------------------------------- отрисовка HUD
-    # Вид: 5 мини-панелей 3x5 — панель 0 = что нажимать СЕЙЧАС,
-    # панели 1..4 = следующие ходы песни (подсказка наперёд).
-    PANEL_CAPS = ["СЕЙЧАС", "+1 ХОД", "+2 ХОД", "+3 ХОД", "+4 ХОД"]
-    PANEL_STR = [1.0, 0.62, 0.48, 0.36, 0.26]
+    # Три клавиатуры: текущий ход и два следующих, без дублирующих подписей.
+    HUD_COLORS = {
+        "transparent": "#0b1230", "panel": "#182733", "edge": "#52616c",
+        "key": "#283945", "key_edge": "#60717a", "text": "#f5efdf",
+        "muted": "#b8c6c9", "now": "#efd4a0", "next": "#9bc9d2",
+        "ink": "#26333b", "hit": "#f6ead0", "wrong": "#d7968d",
+    }
 
     def _redraw(self):
         # полная пересборка элементов (масштаб/песня/партии) в ближайшем кадре
@@ -839,28 +970,24 @@ class HudApp:
 
     def _layout_geom(self):
         s = self.scale
-        cw, ch = int(44 * s), int(34 * s)     # крупная клавиша игрового HUD
-        g = int(10 * s)                         # воздушный зазор
-        padp = int(16 * s)                      # внутренний отступ панели
-        sp = int(10 * s)                       # зазор между панелями
-        pad = int(12 * s)
-        cap = int(18 * s)                      # строка заголовков панелей
-        foot = int(24 * s)                     # строка названия + прогресс
+        cw, ch = int(44 * s), int(34 * s)
+        g, padp, sp, pad = int(10 * s), int(16 * s), int(12 * s), int(12 * s)
+        foot = int(30 * s)
         panel_w = padp * 2 + cw * 5 + g * 4
         panel_h = padp * 2 + ch * 3 + g * 2
-        # Три горизонтальные панели 5x3: текущий и два следующих хода.
         w = pad * 2 + panel_w * 3 + sp * 2
-        h = pad + cap + panel_h + int(8 * s) + foot + pad
+        h = pad * 2 + panel_h + foot
         return {"s": s, "cw": cw, "ch": ch, "g": g, "padp": padp, "sp": sp,
-                "pad": pad, "cap": cap, "foot": foot,
-                "panel_w": panel_w, "panel_h": panel_h, "w": w, "h": h}
+                "pad": pad, "foot": foot, "panel_w": panel_w, "panel_h": panel_h,
+                "w": w, "h": h}
 
     def _frame(self):
         try:
-            if self._it is None or self._need_rebuild:
+            if not self.hud_hidden and (self._it is None or self._need_rebuild):
                 self._build_items()
                 self._need_rebuild = False
-            self._animate_items()
+            if not self.hud_hidden:
+                self._animate_items()
         except Exception as e:
             print("frame error:", e)
         self.root.after(33, self._frame)
@@ -870,201 +997,106 @@ class HudApp:
         return "#%02x%02x%02x" % tuple(int(x) for x in rgb)
 
     def _build_items(self):
-        c = self.cv
-        L = self._layout_geom()
-        if int(c.cget("width")) != L["w"] or int(c.cget("height")) != L["h"]:
-            c.config(width=L["w"], height=L["h"])
-            self.root.geometry("%dx%d" % (L["w"], L["h"]))
+        c, L, C = self.cv, self._layout_geom(), self.HUD_COLORS
+        c.config(width=L["w"], height=L["h"], bg=C["transparent"])
+        self.root.geometry("%dx%d" % (L["w"], L["h"]))
         c.delete("all")
         s = L["s"]
-        it = {"body": [[None] * 15 for _ in range(5)], "labels": [[None] * 15 for _ in range(5)],
-              "caps": [None] * 5,
-              "name": None, "time": None, "bar_fill": None, "next": None}
-        # фон окна
-        it["bg"] = c.create_rectangle(0, 0, L["w"], L["h"],
-                                      fill="#0b1230", outline="", width=0)
-        # пять панелей с заголовками
-        f_cap = ("Segoe UI", max(8, int(11 * s)), "bold")
-        x = L["pad"]
-        yp = L["pad"] + L["cap"]
-        cap_y = L["pad"] + int(15 * s)
-        for p in range(5):
-            if p > 2:
-                continue
-            it["caps"][p] = c.create_text(x + L["panel_w"] // 2, cap_y,
-                                          text=self.PANEL_CAPS[p], font=f_cap,
-                                          fill="#ffd166" if p == 0 else "#8fa3c8")
-            c.create_rectangle(x, yp, x + L["panel_w"], yp + L["panel_h"],
-                               fill="#122446", outline="", width=0)
-            for row in range(3):
-                for col in range(5):
-                    idx = row * 5 + col
-                    kx = x + L["padp"] + col * (L["cw"] + L["g"])
-                    ky = yp + L["padp"] + row * (L["ch"] + L["g"])
-                    pts = rr_points(kx, ky, kx + L["cw"], ky + L["ch"],
-                                    max(2, int(3 * s)))
-                    it["body"][p][idx] = c.create_polygon(
-                        pts, smooth=True, fill="#232c52", outline="#33406e",
-                        width=max(1, int(1.3 * s)))
-                    it["labels"][p][idx] = c.create_text(
-                        (kx + kx + L["cw"]) // 2, (ky + ky + L["ch"]) // 2,
-                        text=CODES[idx], font=("Segoe UI", max(11, int(16 * s)), "bold"),
-                        fill="#f5fbff")
+        it: dict[str, Any] = {"body": [[None] * 15 for _ in range(3)],
+              "labels": [[None] * 15 for _ in range(3)],
+              "rings": [[None] * 15 for _ in range(3)]}
+        x, yp = L["pad"], L["pad"]
+        for p in range(3):
+            c.create_polygon(rr_points(x, yp, x + L["panel_w"], yp + L["panel_h"], int(18 * s)),
+                             smooth=True, fill=C["panel"], outline=C["edge"], width=1)
+            for idx in range(15):
+                row, col = divmod(idx, 5)
+                kx = x + L["padp"] + col * (L["cw"] + L["g"])
+                ky = yp + L["padp"] + row * (L["ch"] + L["g"])
+                it["body"][p][idx] = c.create_polygon(
+                    rr_points(kx, ky, kx + L["cw"], ky + L["ch"], max(3, int(9 * s))),
+                    smooth=True, fill=C["key"], outline=C["key_edge"], width=1)
+                # Тонкое кольцо напоминает клавиши инструмента Sky; без орнаментов.
+                r = int(12 * s)
+                cx, cy = kx + L["cw"] / 2, ky + L["ch"] / 2
+                it["rings"][p][idx] = c.create_oval(cx-r, cy-r, cx+r, cy+r,
+                                                    outline=C["edge"], width=1)
+                it["labels"][p][idx] = c.create_text(
+                    cx, cy, text=CODES[idx], font=("Segoe UI", max(10, int(13 * s))), fill=C["text"])
             x += L["panel_w"] + L["sp"]
-        # нижняя строка: название, время, прогресс
         bx1, bx2 = L["pad"], L["w"] - L["pad"]
-        bar_y = L["h"] - L["pad"] - max(3, int(5 * s))
-        it["bar_bg"] = c.create_rectangle(bx1, bar_y, bx2,
-                                          bar_y + max(3, int(5 * s)),
-                                          fill="#25305c", outline="")
-        it["bar_fill"] = c.create_rectangle(bx1, bar_y, bx1,
-                                            bar_y + max(3, int(5 * s)),
-                                            fill="#ffd166", outline="", width=0)
-        ty = bar_y - int(6 * s)
-        if self.song:
-            it["name"] = c.create_text(bx1, ty, anchor="sw",
-                                       text=self.song["name"][:30],
-                                       font=("Segoe UI", max(8, int(10 * s)), "bold"),
-                                       fill="#eef4ff")
-        it["next"] = c.create_text((bx1 + bx2) // 2, ty - int(18 * s), anchor="s",
-                                    text="", font=("Segoe UI", max(8, int(10 * s)), "bold"),
-                                    fill="#b9eaf2")
-        it["time"] = c.create_text(bx2, ty, anchor="se", text="",
-                                   font=("Segoe UI", max(8, int(10 * s))),
-                                   fill="#8fd0ff")
+        bar_y = L["h"] - L["pad"]
+        it["bar_bg"] = c.create_line(bx1, bar_y, bx2, bar_y, fill=C["edge"], width=max(2, int(2*s)))
+        it["bar_fill"] = c.create_line(bx1, bar_y, bx1, bar_y, fill=C["now"], width=max(2, int(2*s)))
+        it["name"] = c.create_text(bx1, bar_y-int(7*s), anchor="sw",
+                                   text=self.song["name"][:50] if self.song else "",
+                                   font=("Segoe UI", max(8, int(10*s))), fill=C["text"])
+        it["time"] = c.create_text(bx2, bar_y-int(7*s), anchor="se", text="",
+                                   font=("Segoe UI", max(8, int(10*s))), fill=C["muted"])
         self._it = it
-        self._last_fill = [None] * 75
-        self._last_out = [None] * 75
-        self._last_frac = 0.0
-        self._last_time = None
+        self._last_style: list[tuple[str, str, str, str] | None] = [None] * 45
+        self._last_frac, self._last_time = None, None
 
     def _cursor(self, tl, now_ms):
-        """Индекс текущего хода: последнее событие, до которого <= now+опережение."""
         if not tl or not tl["evs"]:
             return 0
-        lead = 0.35 * tl["gap"]
-        p = 0
+        lead, p = 0.35 * tl["gap"], 0
         for i, e in enumerate(tl["evs"]):
-            if e["t"] <= now_ms + lead:
-                p = i
-            else:
+            if e["t"] > now_ms + lead:
                 break
+            p = i
         return p
 
     def _animate_items(self):
-        it = self._it
-        if it is None:
+        if self._it is None:
             return
-        c = self.cv
-        L = self._layout_geom()
-        tl = self.run["tl"] if self.run else None
-        now = self.song_time_ms() if self.run else 0.0
-        step_mode = bool(self.run and self.run["mode"] in ("step", "train"))
-        step_p = 0
-        # события для 5 панелей: текущее + 4 следующих
-        events5 = []
-        if tl and tl["evs"]:
-            step_p = self.run["step_idx"] if step_mode else self._cursor(tl, now)
-            events5 = tl["evs"][step_p:step_p + 5]
-        # Явная подпись состава ходов: аккорды всегда видны целиком.
-        if it.get("caps"):
-            for j in range(3):
-                if j < len(events5):
-                    chord = "+".join(CODES[n["key"]] for n in events5[j]["notes"])
-                    title = "СЕЙЧАС  " + chord if j == 0 else ("+%d  %s" % (j, chord))
-                else:
-                    title = self.PANEL_CAPS[j]
-                c.itemconfig(it["caps"][j], text=title)
-        idle = not self.run
-        hl = [[None] * 15 for _ in range(5)]
-        for j, ev in enumerate(events5):
-            for n in ev["notes"]:
-                part = int(n["part"]) - 1
-                hl[j][n["key"]] = PART_COLORS[part % len(PART_COLORS)]
+        it, c, C, L = self._it, self.cv, self.HUD_COLORS, self._layout_geom()
+        r = self.run
+        tl = r["tl"] if r else self.preview_tl
+        now = self.song_time_ms() if r else 0.0
+        step_mode = bool(r and r["mode"] in ("step", "train"))
+        cursor = (r["step_idx"] if step_mode else self._cursor(tl, now)) if r else 0
+        events = tl["evs"][cursor:cursor+3] if tl else []
         pf = time.perf_counter()
-        base = (14, 19, 48)
-        for p in range(5):
+        for p in range(3):
+            active = {n["key"] for n in events[p]["notes"]} if p < len(events) else set()
             for idx in range(15):
-                k = p * 15 + idx
-                body = it["body"][p][idx]
-                if body is None:
-                    continue
-                col = hl[p][idx]
-                if p > 0 and col:
-                    # Будущие ходы всегда синие, чтобы визуально отличаться
-                    # от текущего золотого хода и не зависеть от цвета партии.
-                    col = (77, 210, 255)
-                out = "#33406e"
-                done_key = False
-                if p == 0 and step_mode and self.run and idx in self.run["step_done"]:
-                    done_key = True
-                if done_key:
-                    fill = (90, 225, 140)
-                    out = "#ffffff"
-                elif col:
-                    strg = self.PANEL_STR[p] * (0.7 if idle else 1.0)
-                    if p > 0:
-                        # Следующие ходы должны быть читаемыми поверх игры.
-                        strg = max(strg, 0.72)
-                    fill = blend(base, col, strg)
-                    if p == 0:
-                        out = self._hex(blend(col, (255, 255, 255), 0.55))
-                else:
-                    fill = blend(base, (255, 255, 255), 0.14)
-                    # Следующие ходы видны тонким контуром на той же клавиатуре.
-                    for look, color in enumerate(PART_COLORS[0:1], 1):
-                        if hl[look][idx]:
-                            out = self._hex(blend(hl[look][idx], (255,255,255), .35))
-                            break
-                # вспышка попадания/ошибки — только на панели «Сейчас»
-                fl = self.flash.get(idx) if p == 0 else None
-                if fl and pf < fl[1]:
-                    fill = (110, 230, 140) if fl[0] == "hit" else (255, 120, 120)
-                    out = "#2e9e4f" if fl[0] == "hit" else "#cc2222"
-                elif p == 0 and idx in self.pressed_key and not done_key:
-                    out = "#ffffff"
-                fh = self._hex(fill)
-                if self._last_fill[k] != fh:
-                    c.itemconfig(body, fill=fh)
-                    self._last_fill[k] = fh
-                if self._last_out[k] != out:
-                    c.itemconfig(body, outline=out)
-                    self._last_out[k] = out
-        # прогресс-бар и время — только во время прогона
-        if self.run:
-            if step_mode and tl and tl["evs"]:
-                total_ev = len(tl["evs"])
-                cur = min(step_p, total_ev - 1)
-                frac = tl["evs"][cur]["t"] / max(1.0, self.song["dur_ms"])
-                ts = "ход %d/%d" % (min(step_p + 1, total_ev), total_ev)
+                fill, edge, text, ring = C["key"], C["key_edge"], C["text"], C["edge"]
+                if idx in active:
+                    fill = C["now"] if p == 0 else C["next"]
+                    edge, text, ring = C["text"], C["ink"], C["ink"]
+                if p == 0:
+                    if step_mode and idx in r["step_done"]:
+                        fill, edge, text, ring = C["hit"], C["text"], C["ink"], C["ink"]
+                    fl = self.flash.get(idx)
+                    if fl and pf < fl[1]:
+                        fill = C["hit"] if fl[0] == "hit" else C["wrong"]
+                        edge, text, ring = C["text"], C["ink"], C["ink"]
+                    elif idx in self.pressed_key:
+                        edge = C["text"]
+                style = fill, edge, text, ring
+                k = p*15 + idx
+                if self._last_style[k] != style:
+                    c.itemconfig(it["body"][p][idx], fill=fill, outline=edge)
+                    c.itemconfig(it["labels"][p][idx], fill=text)
+                    c.itemconfig(it["rings"][p][idx], outline=ring)
+                    self._last_style[k] = style
+        frac, ts = 0.0, ""
+        if r:
+            if step_mode and tl["evs"]:
+                total = len(tl["evs"])
+                frac = min(cursor, total) / total
+                ts = "ход %d/%d" % (min(cursor + 1, total), total)
             else:
                 frac = min(1.0, now / max(1.0, self.song["dur_ms"]))
                 ts = "%s / %s" % (fmt_dur(now), fmt_dur(self.song["dur_ms"]))
-            if abs(frac - self._last_frac) > 0.002:
-                bx1 = L["pad"]
-                bw = L["w"] - L["pad"] * 2
-                bar_y = L["h"] - L["pad"] - max(3, int(5 * L["s"]))
-                c.coords(it["bar_fill"], bx1, bar_y,
-                         bx1 + bw * frac, bar_y + max(3, int(5 * L["s"])))
-                self._last_frac = frac
-            if ts != self._last_time:
-                c.itemconfig(it["time"], text=ts)
-                self._last_time = ts
-            if tl and tl.get("evs"):
-                labels = []
-                for ev in events5[1:5]:
-                    labels.append("+".join(CODES[n["key"]] for n in ev["notes"]))
-                nxt = "  ›  ".join(labels)
-                c.itemconfig(it["next"], text=("ДАЛЬШЕ  " + nxt) if nxt else "")
-        elif self._last_frac != 0.0:
-            bar_y = L["h"] - L["pad"] - max(3, int(5 * L["s"]))
-            c.coords(it["bar_fill"], L["pad"], bar_y, L["pad"], bar_y)
-            self._last_frac = 0.0
-            if self._last_time is not None:
-                c.itemconfig(it["time"], text="")
-                self._last_time = None
-            if it.get("next"):
-                c.itemconfig(it["next"], text="")
+        if frac != self._last_frac:
+            bx1, bx2, y = L["pad"], L["w"]-L["pad"], L["h"]-L["pad"]
+            c.coords(it["bar_fill"], bx1, y, bx1+(bx2-bx1)*frac, y)
+            self._last_frac = frac
+        if ts != self._last_time:
+            c.itemconfig(it["time"], text=ts)
+            self._last_time = ts
 
     def quit(self):
         self.save_cfg()
@@ -1172,14 +1204,6 @@ def main():
             pass
         root = tk.Tk()
         app = HudApp(root)
-        if not app.song:
-            demo = os.path.join(APP_DIR, "A cruel angel.txt")
-            if os.path.exists(demo):
-                try:
-                    with open(demo, "r", encoding="utf-8-sig") as f:
-                        app.set_song(parse_song(f.read(), os.path.basename(demo)))
-                except ValueError as e:
-                    app.status(str(e), err=True)
         root.mainloop()
 
 
