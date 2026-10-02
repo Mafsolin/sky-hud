@@ -1029,7 +1029,7 @@ class HudApp:
         it["time"] = c.create_text(bx2, bar_y-int(7*s), anchor="se", text="",
                                    font=("Segoe UI", max(8, int(10*s))), fill=C["muted"])
         self._it = it
-        self._last_style: list[tuple[str, str, str] | None] = [None] * 45
+        self._last_style: list[tuple[str, str, str, int] | None] = [None] * 45
         self._last_frac, self._last_time = None, None
 
     def _cursor(self, tl, now_ms):
@@ -1052,6 +1052,7 @@ class HudApp:
         step_mode = bool(r and r["mode"] in ("step", "train"))
         cursor = (r["step_idx"] if step_mode else self._cursor(tl, now)) if r else 0
         events = tl["evs"][cursor:cursor+3] if tl else []
+        next_keys = {n["key"] for n in events[1]["notes"]} if len(events) > 1 else set()
         pf = time.perf_counter()
         for p in range(3):
             active = {n["key"] for n in events[p]["notes"]} if p < len(events) else set()
@@ -1069,10 +1070,16 @@ class HudApp:
                         edge, text = C["text"], C["ink"]
                     elif idx in self.pressed_key:
                         edge = C["text"]
-                style = fill, edge, text
+                # Первая карточка одновременно показывает текущий и следующий ход.
+                # Контур остаётся виден даже при общей клавише или вспышке попадания.
+                width = 1
+                if p == 0 and idx in next_keys:
+                    edge = C["next"]
+                    width = max(2, int(2 * L["s"]))
+                style = fill, edge, text, width
                 k = p*15 + idx
                 if self._last_style[k] != style:
-                    c.itemconfig(it["body"][p][idx], fill=fill, outline=edge)
+                    c.itemconfig(it["body"][p][idx], fill=fill, outline=edge, width=width)
                     c.itemconfig(it["labels"][p][idx], fill=text)
                     self._last_style[k] = style
         frac, ts = 0.0, ""

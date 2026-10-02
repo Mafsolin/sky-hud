@@ -176,6 +176,38 @@ class HudTests(unittest.TestCase):
             lo, hi = sorted((luminance(background), luminance(foreground)))
             self.assertGreaterEqual((hi+.05)/(lo+.05), 7.0)
 
+    def test_first_panel_outlines_next_chord_without_replacing_current_fill(self):
+        song = hud.parse_song('{"songNotes":['
+            '{"time":0,"key":"1Key0"},{"time":0,"key":"1Key4"},'
+            '{"time":250,"key":"1Key1"},{"time":250,"key":"1Key4"},'
+            '{"time":500,"key":"1Key2"}]}')
+        self.app.set_song(song)
+        self.app._build_items()
+        self.app._animate_items()
+        C = self.app.HUD_COLORS
+        def option(panel, key, name):
+            return self.app.cv.itemcget(self.app._it["body"][panel][key], name)
+        self.assertEqual(option(0, 1, "outline"), C["next"])
+        self.assertGreaterEqual(float(option(0, 1, "width")), 2)
+        self.assertEqual(option(0, 1, "fill"), C["key"])
+        self.assertEqual(option(0, 0, "fill"), C["now"])
+        # A key present in BOTH chords keeps the current fill and the next outline.
+        self.assertEqual(option(0, 4, "fill"), C["now"])
+        self.assertEqual(option(0, 4, "outline"), C["next"])
+        self.assertNotEqual(option(2, 1, "outline"), C["next"])
+        self.app.start()
+        self.app._judge_step(0)
+        self.app._judge_step(4)
+        self.app._animate_items()
+        self.assertEqual(option(0, 2, "outline"), C["next"])
+        self.assertNotEqual(option(0, 1, "outline"), C["next"])
+        self.assertEqual(float(option(0, 1, "width")), 1)
+        self.app._judge_step(1)
+        self.app._judge_step(4)
+        self.app._animate_items()
+        self.assertNotEqual(option(0, 2, "outline"), C["next"])
+        self.assertEqual(float(option(0, 2, "width")), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
