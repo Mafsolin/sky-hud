@@ -269,24 +269,50 @@ class HudApp:
             self.root.withdraw()
 
     # ---------------------------------------------------------- окно/стили
-    def place_panel(self):
-        # Saved screen coordinates may belong to a secondary monitor.
-        self.root.update_idletasks()
-        px, py = self.cfg.get("px"), self.cfg.get("py")
-        if px is not None and py is not None:
-            self.panel.geometry("%+d%+d" % (int(px), int(py)))
-            return
-        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+    @staticmethod
+    def _desktop_bounds():
+        u = ctypes.windll.user32
+        return (u.GetSystemMetrics(76), u.GetSystemMetrics(77),
+                u.GetSystemMetrics(78), u.GetSystemMetrics(79))
+
+    def _on_desktop(self, x, y):
+        """Отклоняет координаты -32000, которые Tk отдаёт для скрытого окна."""
+        try:
+            x, y = int(x), int(y)
+        except (TypeError, ValueError):
+            return False
+        vx, vy, vw, vh = self._desktop_bounds()
+        return vx - 32 <= x < vx + vw - 40 and vy - 32 <= y < vy + vh - 40
+
+    def _default_hud_pos(self):
+        vx, vy, vw, vh = self._desktop_bounds()
+        L = self._layout_geom()
+        return vx + vw - L["w"] - 60, vy + vh - L["h"] - 90
+
+    def _default_panel_pos(self):
+        vx, vy, vw, vh = self._desktop_bounds()
         pw, ph = self.panel.winfo_reqwidth(), self.panel.winfo_reqheight()
         rx, ry, rw, rh = self.geom()
-        px, py = rx + rw + 14, max(20, ry)
-        if px + pw > sw:
-            px = max(10, rx - pw - 14)
-        if px + pw > sw:
-            px = max(10, (sw - pw) // 2)
-        if py + ph > sh:
-            py = max(10, sh - ph - 40)
-        self.panel.geometry("%+d%+d" % (px, py))
+        if not self._on_desktop(rx, ry):
+            rx, ry = self._default_hud_pos()
+            rw, rh = 0, 0
+        px, py = rx + rw + 14, max(vy + 20, ry)
+        if px + pw > vx + vw:
+            px = max(vx + 10, rx - pw - 14)
+        if px + pw > vx + vw:
+            px = max(vx + 10, vx + (vw - pw) // 2)
+        if py + ph > vy + vh:
+            py = max(vy + 10, vy + vh - ph - 40)
+        return px, py
+
+    def place_panel(self):
+        # Сохранённые координаты могут быть устаревшими или с другого монитора.
+        self.root.update_idletasks()
+        px, py = self.cfg.get("px"), self.cfg.get("py")
+        if self._on_desktop(px, py):
+            self.panel.geometry("+%d+%d" % (int(px), int(py)))
+            return
+        self.panel.geometry("+%d+%d" % self._default_panel_pos())
 
     def _make_click_through(self):
         try:
@@ -333,6 +359,13 @@ class HudApp:
     def save_cfg(self):
         x, y, w, h = self.geom()
         px, py = self.panel.winfo_rootx(), self.panel.winfo_rooty()
+        # Скрытое окно отдаёт размер 1x1 и координаты -32000 — их нельзя писать в конфиг.
+        if w < 50 or h < 30 or not self._on_desktop(x, y):
+            x, y = self._default_hud_pos()
+            L = self._layout_geom()
+            w, h = L["w"], L["h"]
+        if not self._on_desktop(px, py):
+            px, py = self._default_panel_pos()
         cfg = {
             "x": x, "y": y, "w": w,
             "px": px, "py": py,
@@ -343,6 +376,7 @@ class HudApp:
             "favorites": sorted(self.favorites),
             "last_song": self.song_path,
         }
+        self.cfg = cfg
         try:
             with open(self.CFG_FILE, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=1)

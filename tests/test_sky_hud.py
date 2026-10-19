@@ -265,6 +265,28 @@ class HudTests(unittest.TestCase):
             self.assertIn("Ошибка", win.import_status.cget("text"))
             win.destroy()
 
+    def test_offscreen_saved_positions_are_rescued_onto_the_desktop(self):
+        self.app.cfg["px"], self.app.cfg["py"] = -30463, -31076
+        self.app.place_panel()
+        self.root.update_idletasks()
+        vx, vy, vw, vh = self.app._desktop_bounds()
+        px, py = self.app.panel.winfo_x(), self.app.panel.winfo_y()
+        self.assertTrue(vx <= px < vx + vw - 40, (px, vw))
+        self.assertTrue(vy <= py < vy + vh - 40, (py, vh))
+
+    def test_saving_never_persists_hidden_window_coordinates(self):
+        import json
+        self.app.root.geometry("-30463-31076")
+        self.app.panel.geometry("-30463-31076")
+        self.root.update_idletasks()
+        self.app.save_cfg()
+        saved = json.loads(self.cfg.read_text(encoding="utf-8"))
+        vx, vy, vw, vh = self.app._desktop_bounds()
+        for key, lo, hi in (("x", vx, vx + vw), ("px", vx, vx + vw),
+                            ("y", vy, vy + vh), ("py", vy, vy + vh)):
+            self.assertTrue(lo <= saved[key] < hi, (key, saved[key]))
+        self.assertGreaterEqual(saved["w"], 50)
+
 
 if __name__ == "__main__":
     unittest.main()
