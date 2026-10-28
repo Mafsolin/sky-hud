@@ -29,6 +29,17 @@ class ReleaseTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_cli_check_supports_english_windows_console_encoding(self):
+        import subprocess
+        import sys
+        fixture = self.base / "check.json"
+        fixture.write_text('{"songNotes":[{"time":0,"key":"1Key0"}]}', encoding="utf-8")
+        env = dict(os.environ, PYTHONIOENCODING="cp1252")
+        check = subprocess.run([sys.executable, str(Path(hud.__file__).resolve()), "--check", str(fixture)],
+                               env=env, capture_output=True, timeout=10)
+        self.assertEqual(check.returncode, 0, check.stderr)
+        self.assertIn(b"ALL PASS", check.stdout)
+
     def test_verified_download_contains_extracted_updater(self):
         with patch.object(hud.urllib.request, "urlopen", return_value=io.BytesIO(self.data)):
             work, package, sidecar, digest = hud.download_update(self.release, work_root=self.base)

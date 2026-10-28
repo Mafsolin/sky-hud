@@ -1783,6 +1783,9 @@ def fmt_dur(ms):
 
 # ---------------------------------------------------------------- самопроверка
 def check_mode(paths):
+    # Diagnostic output must not fail on Western Windows console encodings.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="backslashreplace")
     import random
     ok = True
 
