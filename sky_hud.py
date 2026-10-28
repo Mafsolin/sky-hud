@@ -16,20 +16,60 @@ Sky HUD — оверлей-тренажёр поверх Sky: Children of the Li
 """
 
 import ctypes
+import hashlib
 import json
 import math
 import os
 import queue
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tkinter as tk
 from typing import Any
 from tkinter import filedialog, ttk
+import urllib.error
+import urllib.request
 import winsound
+import zipfile
 
 APP_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
+APP_VERSION = "1.1.0"
+UPDATE_REPO = "Mafsolin/sky-hud"
+
+
+def _version_tuple(value):
+    numbers = [int(x) for x in re.findall(r"\d+", str(value or ""))[:3]]
+    return tuple((numbers + [0, 0, 0])[:3])
+
+
+def update_message(release):
+    """Return a Russian status message for a GitHub latest-release payload."""
+    tag = str(release.get("tag_name") or "").strip()
+    if not tag:
+        return "На GitHub пока нет опубликованных релизов"
+    if _version_tuple(tag) > _version_tuple(APP_VERSION):
+        url = release.get("html_url") or ("https://github.com/%s/releases" % UPDATE_REPO)
+        return "Доступна новая версия %s · %s" % (tag, url)
+    return "Версия %s актуальна" % APP_VERSION
+
+
+def _release_asset(release):
+    for asset in release.get("assets") or []:
+        if asset.get("name") == "SkyHUD-Update.zip":
+            return asset
+    return None
+
+
+def _sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 # ---------------------------------------------------------------- данные
 NOTE_NAMES = ["C", "D", "E", "F", "G", "A", "B", "C", "D", "E", "F", "G", "A", "B", "C"]
@@ -68,16 +108,24 @@ def parse_song(text, src_name="песня"):
         if not isinstance(n, dict):
             continue
         key = str(n.get("key", ""))
-        m = re.match(r"^(\d+)?Key(\d+)$", key, re.I) or re.match(r"^Key\s*(\d+)$", key, re.I)
-        if not m:
+        m = re.match(r"^(?:(\d+)\s*)?Key\s*(\d+)$", key, re.I)
+        if m:
+            part = m.group(1) or "1"
+            num = int(m.group(2))
+        else:
             mm = re.search(r"(\d+)$", key)
             if not mm:
                 continue
-            m = (None, "", mm.group(1))
-        part = m.group(1) if m.group(1) else "1"
-        num = int(m.group(2))
+            part = "1"
+            num = int(mm.group(1))
+        try:
+            note_time = float(n.get("time", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(note_time):
+            continue
         max_nums.append(num)
-        parts_map.setdefault(part, []).append((float(n.get("time")) or 0.0, num))
+        parts_map.setdefault(part, []).append((note_time, num))
 
     if not parts_map:
         raise ValueError("В файле не нашлось нот")
@@ -132,10 +180,26 @@ def build_timeline(song, part_ids):
                 e = by_time[t]
                 for k in ks:
                     e["notes"].append({"key": k, "part": p["id"]})
+    return _timeline_from_events(evs)
+
+
+def _timeline_from_events(evs):
+    """Build timing metadata from already grouped, chronologically sorted events."""
+    normalized = []
+    for event in evs:
+        seen = set()
+        notes = []
+        for note in event["notes"]:
+            if note["key"] in seen:
+                continue
+            seen.add(note["key"])
+            notes.append(dict(note))
+        normalized.append({"t": event["t"], "notes": notes})
+    evs = normalized
+    times = [e["t"] for e in evs]
     gaps = [times[i + 1] - times[i] for i in range(len(times) - 1) if times[i + 1] - times[i] > 0]
     gaps.sort()
-    gap = gaps[len(gaps) // 2] if gaps else 250.0
-    gap = max(80.0, gap)
+    gap = max(80.0, gaps[len(gaps) // 2] if gaps else 250.0)
     instances = []
     for e in evs:
         for n in e["notes"]:
@@ -144,6 +208,17 @@ def build_timeline(song, part_ids):
                               "consumed": False, "done": False})
     end_t = max((i["close"] for i in instances), default=(times[-1] if times else 0))
     return {"evs": evs, "gap": gap, "instances": instances, "end_t": end_t}
+
+
+def slice_timeline(tl, start, end):
+    """Return a zero-based practice fragment from inclusive event indexes."""
+    selected = tl["evs"][max(0, start):end + 1]
+    if not selected:
+        return _timeline_from_events([])
+    origin = selected[0]["t"]
+    events = [{"t": e["t"] - origin,
+               "notes": [dict(n) for n in e["notes"]]} for e in selected]
+    return _timeline_from_events(events)
 
 
 # ---------------------------------------------------------------- HUD
@@ -174,6 +249,7 @@ class SoundBus:
     def __init__(self):
         self.q = queue.Queue()
         self.on = True
+        self._closed = False
         self.t = threading.Thread(target=self._run, daemon=True)
         self.t.start()
 
@@ -199,6 +275,16 @@ class SoundBus:
         except queue.Empty:
             pass
 
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        self.on = False
+        self.clear()
+        self.q.put(None)
+        if self.t is not threading.current_thread():
+            self.t.join(timeout=2.0)
+
 
 class HudApp:
     CFG_FILE = os.path.join(APP_DIR, "sky_hud_config.json")
@@ -211,10 +297,10 @@ class HudApp:
         self.scale = float(self.cfg.get("scale", 1.0))
         self.alpha = float(self.cfg.get("alpha", 0.85))
         self.tempo = float(self.cfg.get("tempo", 1.0))
-        self.mode = "train"
-        self.metro_on = False
-        self.sound_on = False
-        self.loop_on = False
+        self.mode = self.cfg.get("mode") if self.cfg.get("mode") in ("demo", "train", "step") else "train"
+        self.metro_on = bool(self.cfg.get("metro", False))
+        self.sound_on = bool(self.cfg.get("sound", False))
+        self.loop_on = bool(self.cfg.get("loop", False))
         parts_cfg = self.cfg.get("parts")
         self.part_sel = None if parts_cfg is None else set(parts_cfg)
         self.song = None
@@ -226,6 +312,9 @@ class HudApp:
         self.hud_hidden = bool(self.cfg.get("hud_hidden", False))
         self.favorites = set(self.cfg.get("favorites") or [])
         self._catalog_cache = None
+        self._catalog_refreshers = []
+        self.preview_index = 0
+        self.practice_range = None
 
         # ---- окно HUD: поверх всего, без рамки, без фокуса, клики проходят сквозь
         root.title("Sky HUD")
@@ -240,7 +329,9 @@ class HudApp:
         self.cv.pack()
         root.update_idletasks()
         self._make_click_through()
+        self._last_valid_hud_pos = None
         self._move_cfg(self.cfg.get("x"), self.cfg.get("y"))
+        self._remember_hud_pos()
 
         # ---- панель управления (обычное окно)
         self.panel = tk.Toplevel(root)
@@ -255,14 +346,16 @@ class HudApp:
         else:
             self.restore_song()
 
-        self.root.after(15, self._poll_keys)
+        self._after_ids = set()
+        self._closed = False
+        self._after(15, self._poll_keys)
         self._it = None
         self._need_rebuild = True
         self._last_frac = 0.0
         self._last_time = None
-        self.root.after(33, self._frame)
-        self.root.after(40, self._tick)
-        self.root.after(400, self._save_cfg_debounced)
+        self._after(33, self._frame)
+        self._after(40, self._tick)
+        self._after(400, self._save_cfg_debounced)
         self._click_through = self._make_click_through()
         self._t0 = time.perf_counter()
         if self.hud_hidden:
@@ -326,9 +419,17 @@ class HudApp:
         except Exception:
             return False
 
+    def _remember_hud_pos(self):
+        x, y, w, h = self.geom()
+        if w >= 50 and h >= 30 and self._on_desktop(x, y):
+            self._last_valid_hud_pos = (x, y, w, h)
+
     def _move_cfg(self, x, y):
-        if x is not None:
+        if self._on_desktop(x, y):
             self.root.geometry("+%d+%d" % (int(x), int(y)))
+        else:
+            self.root.geometry("+%d+%d" % self._default_hud_pos())
+        self._remember_hud_pos()
 
     def geom(self):
         try:
@@ -346,6 +447,28 @@ class HudApp:
 
     _save_pending = False
 
+    def _after(self, delay, callback):
+        holder = {}
+        def run():
+            ident = holder.get("id")
+            if ident is not None:
+                self._after_ids.discard(ident)
+            if not getattr(self, "_closed", False):
+                callback()
+        ident = self.root.after(delay, run)
+        holder["id"] = ident
+        self._after_ids.add(ident)
+        return ident
+
+    def _cancel_afters(self):
+        self._closed = True
+        for ident in list(getattr(self, "_after_ids", ())):
+            try:
+                self.root.after_cancel(ident)
+            except tk.TclError:
+                pass
+        self._after_ids.clear()
+
     def _save_cfg_debounced(self):
         if self._save_pending:
             return
@@ -354,11 +477,18 @@ class HudApp:
         def do():
             self.save_cfg()
             self._save_pending = False
-        self.root.after(500, do)
+        self._after(500, do)
 
     def save_cfg(self):
         x, y, w, h = self.geom()
         px, py = self.panel.winfo_rootx(), self.panel.winfo_rooty()
+        self._remember_hud_pos()
+        if self._last_valid_hud_pos:
+            x, y, w, h = self._last_valid_hud_pos
+        elif self._on_desktop(self.cfg.get("x"), self.cfg.get("y")):
+            x, y = int(self.cfg["x"]), int(self.cfg["y"])
+            L = self._layout_geom()
+            w, h = L["w"], L["h"]
         # Скрытое окно отдаёт размер 1x1 и координаты -32000 — их нельзя писать в конфиг.
         if w < 50 or h < 30 or not self._on_desktop(x, y):
             x, y = self._default_hud_pos()
@@ -394,15 +524,22 @@ class HudApp:
         f = tk.Frame(p)
         f.pack(fill="x", padx=6, pady=(6, 0))
         tk.Button(f, text="Каталог нот", command=self.open_catalog).pack(side="left", padx=2)
+        tk.Button(f, text="Открыть карту", command=self.open_map).pack(side="left", padx=2)
         self.lb_go = tk.Button(f, text="▶ Старт", width=8, command=self.toggle_run)
         self.lb_go.pack(side="left")
         self.lb_hide = tk.Button(f, text="Показать HUD" if self.hud_hidden else "Скрыть HUD полностью",
                                  command=self.toggle_hud)
         self.lb_hide.pack(side="left", padx=(8, 0))
+        tk.Button(f, text="Настройки", command=self.open_settings).pack(side="left", padx=(6, 0))
         self.mode_btns = {}
 
-        self.lb_song = tk.Label(p, text="—", anchor="w", font=("Segoe UI", 9, "bold"))
-        self.lb_song.pack(fill="x", padx=8)
+        song_row = tk.Frame(p)
+        song_row.pack(fill="x", padx=8)
+        self.lb_song = tk.Label(song_row, text="—", anchor="w", font=("Segoe UI", 9, "bold"))
+        self.lb_song.pack(side="left", fill="x", expand=True)
+        self.favorite_button = tk.Button(song_row, text="☆", width=3,
+                                         command=self.toggle_selected_favorite)
+        self.favorite_button.pack(side="right", padx=(6, 0))
         self.lb_meta = tk.Label(p, text="", anchor="w", fg="#666", font=("Segoe UI", 8))
         self.lb_meta.pack(fill="x", padx=8)
 
@@ -467,6 +604,7 @@ class HudApp:
                                   font=("Segoe UI", 8))
         self.lb_status.pack(fill="x", padx=8, pady=(0, 6))
         self.sync_panel_controls()
+        self.sync_favorite_button()
         f2.pack_forget()
 
     def _refresh_catalog(self):
@@ -474,11 +612,16 @@ class HudApp:
         q = self.catalog_query.get().strip().lower() if hasattr(self, "catalog_query") else ""
         if q == "поиск песни…": q = ""
         paths = []
-        if os.path.isdir(root):
-            for base, _, files in os.walk(root):
-                for name in files:
-                    if name.lower().endswith((".txt", ".json")) and (not q or q in name.lower()):
-                        paths.append(os.path.join(base, name))
+        for base, _, files in os.walk(root):
+            for name in files:
+                if not name.lower().endswith((".txt", ".json")):
+                    continue
+                relative = os.path.relpath(os.path.join(base, name), root).replace(os.sep, "/")
+                if not (relative.startswith("Songs/") or relative.startswith("Multi-Sheet Songs/")
+                        or relative.startswith("User Songs/")):
+                    continue
+                if not q or q in name.lower():
+                    paths.append(os.path.join(base, name))
         paths.sort(key=lambda x: os.path.basename(x).lower())
         self.catalog_paths = paths[:500]
         if hasattr(self, "catalog_list"):
@@ -532,16 +675,297 @@ class HudApp:
                     if existing.read() == content:
                         break
                 number += 1
+            except OSError:
+                try:
+                    if os.path.exists(dest):
+                        os.remove(dest)
+                except OSError:
+                    pass
+                raise
         self._catalog_cache = None
         return dest
 
     def toggle_favorite(self, path):
-        key = song_path_key(path)
+        key = path.replace("\\", "/") if not os.path.isabs(path) else song_path_key(path)
         if key in self.favorites:
             self.favorites.remove(key)
         else:
             self.favorites.add(key)
         self.save_cfg()
+        self.sync_favorite_button()
+        for refresh in list(self._catalog_refreshers):
+            try:
+                refresh()
+            except tk.TclError:
+                self._catalog_refreshers.remove(refresh)
+
+    def sync_favorite_button(self):
+        if not hasattr(self, "favorite_button"):
+            return
+        key = self.song_path
+        self.favorite_button.config(
+            text="★" if key and key in self.favorites else "☆",
+            state="normal" if key else "disabled")
+
+    def toggle_selected_favorite(self):
+        if self.song_path:
+            self.toggle_favorite(self.song_path)
+
+    def _selected_part_ids(self):
+        if not self.song:
+            return []
+        selected = self.part_sel or set()
+        return [p["id"] for p in self.song["parts"] if p["id"] in selected]
+
+    def _rebuild_preview_timeline(self, reset=False):
+        self.preview_tl = build_timeline(self.song, self._selected_part_ids()) if self.song else None
+        if reset:
+            self.preview_index = 0
+        elif self.preview_tl and self.preview_tl["evs"]:
+            self.preview_index = min(self.preview_index, len(self.preview_tl["evs"]) - 1)
+        else:
+            self.preview_index = 0
+
+    def open_map(self):
+        if not self.song:
+            self.status("Сначала загрузите песню", err=True)
+            return None
+        win = tk.Toplevel(self.panel)
+        win.title("Sky HUD · карта песни")
+        win.attributes("-topmost", True)
+        px, py = self.panel.winfo_rootx(), self.panel.winfo_rooty()
+        win.geometry("760x650%+d%+d" % (max(20, px - 180), max(20, py - 300)))
+        win.protocol("WM_DELETE_WINDOW", win.destroy)
+        tk.Label(win, text="Карта песни · выберите ход для просмотра или отрезок для практики",
+                 anchor="w", font=("Segoe UI", 11, "bold")).pack(fill="x", padx=10, pady=(10, 4))
+        body = tk.Frame(win)
+        body.pack(fill="both", expand=True, padx=10, pady=4)
+        tree = ttk.Treeview(body, columns=("number", "time", "notes"), show="headings", selectmode="browse")
+        tree.heading("number", text="#")
+        tree.heading("time", text="Время")
+        tree.heading("notes", text="Клавиши")
+        tree.column("number", width=55, stretch=False, anchor="center")
+        tree.column("time", width=100, stretch=False, anchor="center")
+        tree.column("notes", width=540, anchor="w")
+        tree.pack(side="left", fill="both", expand=True)
+        scrollbar = ttk.Scrollbar(body, orient="vertical", command=tree.yview)
+        scrollbar.pack(side="right", fill="y")
+        tree.configure(yscrollcommand=scrollbar.set)
+        win.map_tree = tree
+        selecting = False
+
+        controls = tk.Frame(win)
+        controls.pack(fill="x", padx=10, pady=(4, 10))
+        win.previous_button = tk.Button(controls, text="← Предыдущий")
+        win.previous_button.pack(side="left")
+        win.next_button = tk.Button(controls, text="Следующий →")
+        win.next_button.pack(side="left", padx=(5, 12))
+        tk.Label(controls, text="Практика ходов:").pack(side="left")
+        total = len(self.preview_tl["evs"])
+        win.range_from = tk.StringVar(value=str(self.preview_index + 1))
+        win.range_to = tk.StringVar(value=str(self.preview_index + 1))
+        tk.Spinbox(controls, from_=1, to=max(1, total), width=5,
+                   textvariable=win.range_from).pack(side="left", padx=3)
+        tk.Label(controls, text="—").pack(side="left")
+        tk.Spinbox(controls, from_=1, to=max(1, total), width=5,
+                   textvariable=win.range_to).pack(side="left", padx=3)
+        win.practice_button = tk.Button(controls, text="Ручная практика")
+        win.practice_button.pack(side="left", padx=(8, 3))
+        win.clear_practice_button = tk.Button(controls, text="Вся песня")
+        win.clear_practice_button.pack(side="left")
+
+        def rows():
+            return self.preview_tl["evs"] if self.preview_tl else []
+
+        def select(index):
+            nonlocal selecting
+            count = len(rows())
+            if not count:
+                return
+            index = max(0, min(index, count - 1))
+            self.stop()
+            self.preview_index = index
+            iid = str(index)
+            if iid in tree.get_children():
+                selecting = True
+                try:
+                    tree.selection_set(iid)
+                    tree.focus(iid)
+                    tree.see(iid)
+                finally:
+                    selecting = False
+            self._redraw()
+
+        def changed(_event=None):
+            selected = tree.selection()
+            if selected:
+                index = int(selected[0])
+                if index != self.preview_index:
+                    select(index)
+
+        def move(delta):
+            select(self.preview_index + delta)
+
+        def practice():
+            try:
+                start = int(win.range_from.get()) - 1
+                end = int(win.range_to.get()) - 1
+            except (TypeError, ValueError):
+                self.status("Укажите номера ходов", err=True)
+                return
+            if start < 0 or end >= len(rows()) or start > end:
+                self.status("Неверный диапазон ходов", err=True)
+                return
+            self.stop()
+            self.practice_range = (start, end)
+            self.mode = "step"
+            select(start)
+            self.status("Выбран отрезок %d–%d · ручная практика · нажмите «Старт»" % (start + 1, end + 1))
+
+        def clear_practice():
+            self.stop()
+            self.practice_range = None
+            self.mode = "train"
+            select(0)
+            win.range_from.set("1")
+            win.range_to.set("1")
+            self.status("Выбрана вся песня · нажмите «Старт»")
+
+        win.previous_button.config(command=lambda: move(-1))
+        win.next_button.config(command=lambda: move(1))
+        win.practice_button.config(command=practice)
+        win.clear_practice_button.config(command=clear_practice)
+        tree.bind("<<TreeviewSelect>>", changed)
+        for i, event in enumerate(rows()):
+            labels = ", ".join(CODES[n["key"]] for n in event["notes"])
+            tree.insert("", "end", iid=str(i), values=(i + 1, fmt_dur(event["t"]), labels))
+        select(self.preview_index)
+        return win
+
+    def open_settings(self):
+        win = tk.Toplevel(self.panel)
+        win.title("Sky HUD · настройки")
+        win.attributes("-topmost", True)
+        px, py = self.panel.winfo_rootx(), self.panel.winfo_rooty()
+        win.geometry("430x320%+d+%d" % (max(20, px + 20), max(20, py + 20)))
+        win._release = None
+        win._download_dir = None
+        tk.Label(win, text="Настройки Sky HUD", font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=16, pady=(14, 4))
+        win.creator_label = tk.Label(win, text="Создатель: @mafsolin", fg="#777", font=("Segoe UI", 9))
+        win.creator_label.pack(anchor="w", padx=16)
+        win.repo_label = tk.Label(win, text="Репозиторий: https://github.com/%s" % UPDATE_REPO,
+                                  fg="#777", font=("Segoe UI", 9), anchor="w")
+        win.repo_label.pack(anchor="w", padx=16, pady=(2, 10))
+        win.update_status = tk.Label(win, text="Проверка обновлений ничего не скачивает",
+                                     fg="#777", anchor="w", wraplength=390, justify="left")
+        win.update_status.pack(fill="x", padx=16, pady=(0, 8))
+        buttons = tk.Frame(win)
+        buttons.pack(anchor="w", padx=16)
+        win.update_button = tk.Button(buttons, text="Проверить обновления")
+        win.update_button.pack(side="left")
+        win.install_button = tk.Button(buttons, text="Обновиться", state="disabled")
+        win.install_button.pack(side="left", padx=(8, 0))
+
+        def on_ui(callback):
+            result = {"done": False}
+            def poll():
+                if not win.winfo_exists():
+                    return
+                if result["done"]:
+                    callback(result.get("value"), result.get("error"))
+                else:
+                    self._after(60, poll)
+            self._after(60, poll)
+            return result
+
+        def check():
+            win.update_button.config(state="disabled", text="Проверяю…")
+            win.install_button.config(state="disabled")
+            win.update_status.config(text="Запрос к GitHub…", fg="#777")
+            result = on_ui(lambda value, error: finish_check(value, error))
+            def worker():
+                try:
+                    req = urllib.request.Request(
+                        "https://api.github.com/repos/%s/releases/latest" % UPDATE_REPO,
+                        headers={"Accept": "application/vnd.github+json", "User-Agent": "SkyHUD/%s" % APP_VERSION})
+                    with urllib.request.urlopen(req, timeout=8) as response:
+                        release = json.loads(response.read().decode("utf-8"))
+                    result["value"] = release
+                except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+                    result["error"] = exc
+                finally:
+                    result["done"] = True
+            threading.Thread(target=worker, daemon=True).start()
+
+        def finish_check(release, error):
+            win.update_button.config(state="normal", text="Проверить обновления")
+            if error:
+                win.update_status.config(text="Не удалось проверить обновления: %s" % error, fg="#b00")
+                return
+            message = update_message(release)
+            win._release = release
+            asset = _release_asset(release)
+            if asset and _version_tuple(release.get("tag_name")) > _version_tuple(APP_VERSION):
+                win.install_button.config(state="normal")
+                message += "\nМожно скачать и установить новую версию."
+            win.update_status.config(text=message, fg="#777")
+
+        def install():
+            release = win._release or {}
+            asset = _release_asset(release)
+            if not asset or not asset.get("browser_download_url"):
+                win.update_status.config(text="В релизе нет пакета обновления", fg="#b00")
+                return
+            win.update_button.config(state="disabled")
+            win.install_button.config(state="disabled", text="Скачиваю…")
+            win.update_status.config(text="Скачивание и проверка пакета…", fg="#777")
+            result = on_ui(lambda value, error: finish_install(value, error))
+            def worker():
+                tmp_dir = tempfile.mkdtemp(prefix="sky-hud-update-")
+                package = os.path.join(tmp_dir, "SkyHUD-Update.zip")
+                try:
+                    req = urllib.request.Request(asset["browser_download_url"],
+                                                 headers={"Accept": "application/octet-stream", "User-Agent": "SkyHUD/%s" % APP_VERSION})
+                    with urllib.request.urlopen(req, timeout=60) as response, open(package, "wb") as target:
+                        shutil.copyfileobj(response, target)
+                    expected = str(asset.get("digest") or "")
+                    actual = _sha256(package)
+                    if expected.startswith("sha256:") and actual.lower() != expected.split(":", 1)[1].lower():
+                        raise ValueError("не совпал SHA-256 пакета")
+                    with zipfile.ZipFile(package) as archive:
+                        names = set(archive.namelist())
+                    if not {"SkyHUD.exe", "SkyHUD-Updater.exe"}.issubset(names):
+                        raise ValueError("в пакете нет EXE или updater")
+                    result["value"] = (tmp_dir, package)
+                except Exception as exc:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                    result["error"] = exc
+                finally:
+                    result["done"] = True
+            threading.Thread(target=worker, daemon=True).start()
+
+        def finish_install(value, error):
+            if error:
+                win.update_button.config(state="normal")
+                win.install_button.config(state="normal", text="Обновиться")
+                win.update_status.config(text="Обновление не установлено: %s" % error, fg="#b00")
+                return
+            tmp_dir, package = value
+            updater = os.path.join(tmp_dir, "SkyHUD-Updater.exe")
+            try:
+                subprocess.Popen([updater, "--pid", str(os.getpid()), "--package", package,
+                                  "--install-dir", APP_DIR], cwd=tmp_dir)
+                win.update_status.config(text="Обновление подготовлено. Приложение перезапустится…", fg="#777")
+                self.quit()
+            except Exception as exc:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                win.update_button.config(state="normal")
+                win.install_button.config(state="normal", text="Обновиться")
+                win.update_status.config(text="Не удалось запустить updater: %s" % exc, fg="#b00")
+
+        win.update_button.config(command=check)
+        win.install_button.config(command=install)
+        return win
 
     def open_catalog(self):
         win = tk.Toplevel(self.panel)
@@ -638,10 +1062,20 @@ class HudApp:
             try:
                 self.load_song_file(path)
                 self.status("Загружено: " + os.path.basename(path))
-                win.destroy()
+                close_catalog()
             except Exception as e:
                 self.status("Ошибка: %s" % e, err=True)
 
+        def close_catalog():
+            try:
+                self._catalog_refreshers.remove(refresh)
+            except ValueError:
+                pass
+            if win.winfo_exists():
+                win.destroy()
+
+        self._catalog_refreshers.append(refresh)
+        win.protocol("WM_DELETE_WINDOW", close_catalog)
         q.trace_add("write", lambda *_: refresh())
         tree.bind("<Button-1>", favorite)
         tree.bind("<Double-Button-1>", choose)
@@ -696,6 +1130,7 @@ class HudApp:
     def nudge(self, dx, dy):
         x, y, w, h = self.geom()
         self.root.geometry("+%d+%d" % (x + dx, y + dy))
+        self._remember_hud_pos()
         self._save_cfg_debounced()
 
     def place_bottom(self):
@@ -703,6 +1138,7 @@ class HudApp:
         sh = self.root.winfo_screenheight()
         x, y, w, h = self.geom()
         self.root.geometry("+%d+%d" % ((sw - w) // 2, sh - h - 90))
+        self._remember_hud_pos()
         self._save_cfg_debounced()
 
     # ---------------------------------------------------------- песни
@@ -753,7 +1189,7 @@ class HudApp:
         self.stop()
         self.song = song
         self.song_path = song_path_key(source_path) if source_path else None
-        self.preview_tl = build_timeline(song, [p["id"] for p in song["parts"]])
+        self.practice_range = None
         self.flash.clear()
         ids = [p["id"] for p in song["parts"]]
         if self.part_sel is None:
@@ -762,6 +1198,7 @@ class HudApp:
             keep = self.part_sel & set(ids)
             if not keep:
                 self.part_sel = set(ids)
+        self._rebuild_preview_timeline(reset=True)
         self._render_part_checks()
         meta = []
         if song["bpm"]:
@@ -775,6 +1212,7 @@ class HudApp:
         self.status("Загружено: %s" % kinds)
         self._redraw()
         self.sync_panel_controls()
+        self.sync_favorite_button()
 
     def _render_part_checks(self):
         for w in self.part_frame.winfo_children():
@@ -798,6 +1236,8 @@ class HudApp:
         else:
             self.part_sel.discard(pid)
         self.stop()
+        self.practice_range = None
+        self._rebuild_preview_timeline(reset=True)
         self._redraw()
         self.sync_panel_controls()
         self._save_cfg_debounced()
@@ -820,13 +1260,17 @@ class HudApp:
     def start(self):
         if self.run or not self.song:
             return
-        # Переключатель партий скрыт в интерфейсе, поэтому тренировка всегда
-        # использует все партии файла и не теряет вторую половину аккордов.
-        sel = [p["id"] for p in self.song["parts"]]
+        sel = self._selected_part_ids()
         if not sel:
             self.status("Включите хотя бы одну партию", err=True)
             return
         tl = build_timeline(self.song, sel)
+        if self.practice_range is not None:
+            start, end = self.practice_range
+            if start < 0 or end >= len(tl["evs"]) or start > end:
+                self.status("Выбранный отрезок больше не существует", err=True)
+                return
+            tl = slice_timeline(tl, start, end)
         if not tl["evs"]:
             self.status("В выбранных партиях нет нот", err=True)
             return
@@ -866,6 +1310,12 @@ class HudApp:
             self.status("Шаги: жмите все клавиши панели «Сейчас» — ход пойдёт дальше")
         self.sync_panel_controls()
 
+    def restart_run(self):
+        if not self.run:
+            return
+        self.stop()
+        self.start()
+
     def stop(self):
         if self.run:
             self.run = None
@@ -898,17 +1348,17 @@ class HudApp:
             self._tick_inner()
         except Exception as e:
             print("tick error:", e)
-        self.root.after(30 if self.run else 150, self._tick)
+        self._after(30 if self.run else 150, self._tick)
 
     def _tick_inner(self):
         r = self.run
         if not r:
             return
-        if r["mode"] in ("step", "train"):
-            # пошаговый режим: время не идёт, ходы переключает _judge_step
+        if r["mode"] == "step":
+            # Пошаговый режим: время не идёт, ходы переключает _judge_step.
             if r["step_idx"] >= len(r["tl"]["evs"]):
                 if self.loop_on:
-                    self.start()
+                    self.restart_run()
                 else:
                     self.stop()
             return
@@ -941,7 +1391,7 @@ class HudApp:
         # конец
         if r["ev_idx"] >= len(evs) and now > tl["end_t"] + 600:
             if self.loop_on:
-                self.start()
+                self.restart_run()
             else:
                 self.stop()
 
@@ -962,7 +1412,7 @@ class HudApp:
                     self._key_up(idx)
         except Exception as e:
             print("poll error:", e)
-        self.root.after(8, self._poll_keys)
+        self._after(8, self._poll_keys)
 
     def _key_down(self, idx):
         self.pressed_key.add(idx)
@@ -970,7 +1420,9 @@ class HudApp:
         if r and self.sound_on:
             self.sound.beep(freq_of(idx), 55 if r["mode"] == "train" else 45)
         if r:
-            if r["mode"] in ("train", "step"):
+            if r["mode"] == "train":
+                self._judge(idx, self.song_time_ms())
+            elif r["mode"] == "step":
                 self._judge_step(idx)
 
     def _key_up(self, idx):
@@ -1022,7 +1474,7 @@ class HudApp:
                         self.sound.beep(1568, 45)
                     if r["step_idx"] >= len(evs):
                         if self.loop_on:
-                            self.start()
+                            self.restart_run()
                         else:
                             self.stop()
         else:
@@ -1084,7 +1536,7 @@ class HudApp:
                 self._animate_items()
         except Exception as e:
             print("frame error:", e)
-        self.root.after(33, self._frame)
+        self._after(33, self._frame)
 
     @staticmethod
     def _hex(rgb):
@@ -1122,6 +1574,9 @@ class HudApp:
                                    font=("Segoe UI", max(8, int(10*s))), fill=C["text"])
         it["time"] = c.create_text(bx2, bar_y-int(7*s), anchor="se", text="",
                                    font=("Segoe UI", max(8, int(10*s))), fill=C["muted"])
+        it["credit"] = c.create_text(bx2, L["h"] - max(2, int(2*s)), anchor="se",
+                                      text="@mafsolin", font=("Segoe UI", max(6, int(7*s))),
+                                      fill=C["muted"])
         self._it = it
         self._last_style: list[tuple[str, str, str, int] | None] = [None] * 45
         self._last_frac, self._last_time = None, None
@@ -1143,8 +1598,12 @@ class HudApp:
         r = self.run
         tl = r["tl"] if r else self.preview_tl
         now = self.song_time_ms() if r else 0.0
-        step_mode = bool(r and r["mode"] in ("step", "train"))
-        cursor = (r["step_idx"] if step_mode else self._cursor(tl, now)) if r else 0
+        step_mode = bool(r and r["mode"] == "step")
+        cursor = (r["step_idx"] if step_mode else self._cursor(tl, now)) if r else self.preview_index
+        if tl and tl["evs"]:
+            cursor = max(0, min(cursor, len(tl["evs"]) - 1))
+        else:
+            cursor = 0
         events = tl["evs"][cursor:cursor+3] if tl else []
         next_keys = {n["key"] for n in events[1]["notes"]} if len(events) > 1 else set()
         pf = time.perf_counter()
@@ -1195,8 +1654,9 @@ class HudApp:
 
     def quit(self):
         self.save_cfg()
+        self._cancel_afters()
         try:
-            self.sound.q.put(None)
+            self.sound.close()
         except Exception:
             pass
         self.root.destroy()
@@ -1219,7 +1679,11 @@ def check_mode(paths):
     def t(name, cond, extra=""):
         nonlocal ok
         ok = ok and cond
-        print(("PASS" if cond else "FAIL"), "|", name, ("| " + str(extra)) if extra else "")
+        try:
+            print(("PASS" if cond else "FAIL"), "|", name, ("| " + str(extra)) if extra else "")
+        except UnicodeEncodeError:
+            safe_name = name.encode(sys.stdout.encoding or "ascii", errors="replace").decode(sys.stdout.encoding or "ascii", errors="replace")
+            print(("PASS" if cond else "FAIL"), "|", safe_name, ("| " + str(extra)) if extra else "")
 
     for path in paths:
         with open(path, "r", encoding="utf-8-sig") as f:
@@ -1272,16 +1736,16 @@ def smoke_mode():
         if app.song:
             app._render_part_checks()
         app.start()
-        root.after(1500, done)
+        app._after(1500, done)
 
     def done():
         app.save_cfg()
         print("SMOKE OK: hud mapped=%s panel=%s song=%s run=%s" % (
             root.winfo_ismapped(), app.panel.winfo_ismapped(),
             app.song["name"] if app.song else None, bool(app.run)))
-        root.destroy()
+        app.quit()
 
-    root.after(700, go)
+    app._after(700, go)
     root.mainloop()
 
 
