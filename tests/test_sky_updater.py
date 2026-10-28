@@ -15,7 +15,7 @@ import sky_updater as updater
 class UpdaterTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(dir=os.environ.get("SKY_HUD_TEST_TMPDIR"))
-        self.base = Path(self.tmp.name)
+        self.base = Path(self.tmp.name).resolve()
         self.package = self.base / "update.zip"
         self.install = self.base / "install"
         self.install.mkdir()

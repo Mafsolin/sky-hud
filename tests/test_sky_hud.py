@@ -457,7 +457,8 @@ class HudTests(unittest.TestCase):
 
     def test_saved_control_panel_position_is_restored(self):
         self.app.cfg["px"], self.app.cfg["py"] = 3273, 56
-        self.app.place_panel()
+        with patch.object(self.app, "_desktop_bounds", return_value=(0, 0, 3840, 1080)):
+            self.app.place_panel()
         self.root.update_idletasks()
         self.assertEqual(self.app.panel.winfo_x(), 3273)
         self.assertEqual(self.app.panel.winfo_y(), 56)
