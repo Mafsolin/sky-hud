@@ -1,4 +1,5 @@
 """Regression tests; real Tk widgets use an off-screen scratch window only."""
+import gc
 import json
 import os
 import shutil
@@ -15,18 +16,26 @@ import sky_hud as hud
 
 class HudTests(unittest.TestCase):
     def setUp(self):
+        # Finalize previous destroyed Tk cycles on the main thread, not a network worker.
+        gc.collect()
         self.tmp = tempfile.TemporaryDirectory(dir=os.environ.get("SKY_HUD_TEST_TMPDIR"))
         self.cfg = Path(self.tmp.name) / "config.json"
         self.override = patch.object(hud.HudApp, "CFG_FILE", str(self.cfg))
         self.override.start()
         self.original_app_dir = hud.APP_DIR
         fixture = Path(self.tmp.name) / "app"
-        (fixture / "songs" / "Songs").mkdir(parents=True)
-        (fixture / "songs" / "Multi-Sheet Songs").mkdir(parents=True)
+        (fixture / "songs" / "Songs" / "A").mkdir(parents=True)
+        (fixture / "songs" / "Multi-Sheet Songs" / "B").mkdir(parents=True)
         (fixture / "songs" / "User Songs").mkdir(parents=True)
+        fixture_song = '{"name":"Fixture","songNotes":[{"time":0,"key":"1Key0"}]}'
+        (fixture / "songs/Songs/A/alpha.txt").write_text(fixture_song, encoding="utf-8")
+        (fixture / "songs/Songs/A/beta.txt").write_text(fixture_song, encoding="utf-8")
+        (fixture / "songs/Multi-Sheet Songs/B/gamma.txt").write_text(fixture_song, encoding="utf-8")
         (fixture / "A cruel angel.txt").write_text(
             '{"name":"Demo","songNotes":[{"time":0,"key":"1Key0"}]}', encoding="utf-8")
         hud.APP_DIR = str(fixture)
+        self.custom_override = patch.object(hud.HudApp, "CUSTOM_SONG_DIR", str(fixture / "songs/User Songs"))
+        self.custom_override.start()
         self.root = tk.Tk()
         self.root.geometry("+10000+10000")
         self.app = hud.HudApp(self.root)
@@ -36,6 +45,7 @@ class HudTests(unittest.TestCase):
     def tearDown(self):
         self.app.quit()
         self.override.stop()
+        self.custom_override.stop()
         hud.APP_DIR = self.original_app_dir
         self.tmp.cleanup()
 
@@ -66,6 +76,68 @@ class HudTests(unittest.TestCase):
         self.assertEqual((install / "sky_hud_config.json").read_text(encoding="utf-8"), "keep")
         self.assertEqual((install / "songs/User Songs/mine.txt").read_text(encoding="utf-8"), "keep")
 
+    def test_settings_buttons_download_verified_package_then_launch_sidecar(self):
+        import io
+        import time
+        import zipfile
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w") as archive:
+            archive.writestr("SkyHUD.exe", b"hud")
+            archive.writestr("SkyHUD-Updater.exe", b"updater")
+        data = stream.getvalue()
+        import hashlib
+        release = {"tag_name": "v999.0.0", "assets": [{"name": "SkyHUD-Update.zip",
+            "digest": "sha256:" + hashlib.sha256(data).hexdigest(), "size": len(data),
+            "browser_download_url": "https://github.com/Mafsolin/sky-hud/releases/download/v999.0.0/SkyHUD-Update.zip"}]}
+        win = self.app.open_settings()
+        win.geometry("+10000+10000")
+        def wait_until(predicate):
+            deadline = time.monotonic() + 3
+            while not predicate() and time.monotonic() < deadline:
+                self.root.update()
+                time.sleep(0.01)
+            self.assertTrue(predicate())
+        prepared = None
+        with patch.object(hud.urllib.request, "urlopen", side_effect=[
+                io.BytesIO(json.dumps(release).encode()), io.BytesIO(data)]), \
+                patch.object(hud, "launch_update") as launch, patch.object(self.app, "quit") as quit_app:
+            win.update_button.invoke()
+            wait_until(lambda: str(win.install_button.cget("state")) == "normal")
+            win.install_button.invoke()
+            wait_until(lambda: launch.called)
+            prepared = launch.call_args.args[0]
+            self.assertEqual(Path(prepared[2]).read_bytes(), b"updater")
+            self.assertTrue(quit_app.called)
+        if prepared:
+            shutil.rmtree(prepared[0])
+        win.destroy()
+
+    def test_closing_settings_during_download_discards_prepared_files(self):
+        import threading
+        import time
+        work = Path(self.tmp.name) / "prepared-update"
+        work.mkdir()
+        release_worker = threading.Event()
+        started = threading.Event()
+        def delayed_download(_release):
+            started.set()
+            release_worker.wait(2)
+            return str(work), str(work / "package.zip"), str(work / "updater.exe"), "0" * 64
+        win = self.app.open_settings()
+        win.geometry("+10000+10000")
+        win._release = {"assets": [{"name": "SkyHUD-Update.zip", "browser_download_url": "https://github.com/Mafsolin/sky-hud/"}]}
+        win.install_button.config(state="normal")
+        with patch.object(hud, "download_update", side_effect=delayed_download):
+            win.install_button.invoke()
+            self.assertTrue(started.wait(1))
+            win.destroy()
+            release_worker.set()
+            deadline = time.monotonic() + 1
+            while work.exists() and time.monotonic() < deadline:
+                self.root.update()
+                time.sleep(0.01)
+        self.assertFalse(work.exists())
+
     def test_settings_window_shows_creator_repo_and_update_button(self):
         win = self.app.open_settings()
         try:
@@ -74,6 +146,9 @@ class HudTests(unittest.TestCase):
             self.assertIn("Mafsolin/sky-hud", win.repo_label.cget("text"))
         finally:
             win.destroy()
+
+    def test_update_message_rejects_malformed_payload(self):
+        self.assertIn("некоррект", hud.update_message([]).lower())
 
     def test_update_message_distinguishes_current_and_new_release(self):
         current = hud.update_message({"tag_name": "v" + hud.APP_VERSION})

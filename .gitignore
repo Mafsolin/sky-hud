@@ -4,6 +4,8 @@
 /build/
 /dist/
 /backups/
+/.sky-hud-backups/
+/.sky-hud-stage-*/
 /__pycache__/
 **/__pycache__/
 *.py[cod]

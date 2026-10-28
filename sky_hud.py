@@ -32,9 +32,11 @@ import tkinter as tk
 from typing import Any
 from tkinter import filedialog, ttk
 import urllib.error
+import urllib.parse
 import urllib.request
 import winsound
 import zipfile
+import sky_updater
 
 APP_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
 APP_VERSION = "1.1.0"
@@ -48,6 +50,8 @@ def _version_tuple(value):
 
 def update_message(release):
     """Return a Russian status message for a GitHub latest-release payload."""
+    if not isinstance(release, dict):
+        return "GitHub вернул некорректные данные релиза"
     tag = str(release.get("tag_name") or "").strip()
     if not tag:
         return "На GitHub пока нет опубликованных релизов"
@@ -58,8 +62,10 @@ def update_message(release):
 
 
 def _release_asset(release):
+    if not isinstance(release, dict):
+        return None
     for asset in release.get("assets") or []:
-        if asset.get("name") == "SkyHUD-Update.zip":
+        if isinstance(asset, dict) and asset.get("name") == "SkyHUD-Update.zip":
             return asset
     return None
 
@@ -70,6 +76,52 @@ def _sha256(path):
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def download_update(release, work_root=None):
+    """Download only the fixed repository asset and require GitHub's SHA-256."""
+    asset = _release_asset(release)
+    if not asset:
+        raise ValueError("В релизе нет SkyHUD-Update.zip")
+    if not isinstance(asset, dict):
+        raise ValueError("Некорректные данные файла обновления")
+    digest = str(asset.get("digest") or "")
+    if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest):
+        raise ValueError("GitHub не предоставил SHA-256; установка запрещена")
+    url = urllib.parse.urlsplit(str(asset.get("browser_download_url") or ""))
+    prefix = "/%s/releases/download/" % UPDATE_REPO
+    if url.scheme != "https" or url.netloc.lower() != "github.com" or not url.path.startswith(prefix):
+        raise ValueError("Недоверенный адрес пакета обновления")
+    size = asset.get("size")
+    if not isinstance(size, int) or not 0 < size <= sky_updater.MAX_PACKAGE_BYTES:
+        raise ValueError("Недопустимый размер пакета")
+    with tempfile.TemporaryDirectory(prefix="sky-hud-download-", dir=work_root) as folder:
+        package = os.path.join(folder, "SkyHUD-Update.zip")
+        req = urllib.request.Request(urllib.parse.urlunsplit(url),
+            headers={"Accept": "application/octet-stream", "User-Agent": "SkyHUD/%s" % APP_VERSION})
+        total = 0
+        with urllib.request.urlopen(req, timeout=30) as response, open(package, "xb") as target:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > size:
+                    raise ValueError("Размер скачанного пакета больше заявленного")
+                target.write(chunk)
+        if total != size:
+            raise ValueError("Пакет скачан не полностью")
+        work, verified, sidecar = sky_updater.prepare_update(package, digest, work_root=work_root)
+        return work, verified, sidecar, digest.split(":", 1)[1].lower()
+
+
+def launch_update(prepared):
+    work, package, updater, digest = prepared
+    sky_updater.verify_digest(package, digest)
+    if not os.path.isfile(updater):
+        raise ValueError("Не найден отдельный updater")
+    return subprocess.Popen([updater, "--pid", str(os.getpid()), "--package", package,
+                             "--install-dir", APP_DIR, "--sha256", digest], cwd=work)
 
 # ---------------------------------------------------------------- данные
 NOTE_NAMES = ["C", "D", "E", "F", "G", "A", "B", "C", "D", "E", "F", "G", "A", "B", "C"]
@@ -313,6 +365,7 @@ class HudApp:
         self.favorites = set(self.cfg.get("favorites") or [])
         self._catalog_cache = None
         self._catalog_refreshers = []
+        self._map_refreshers = []
         self.preview_index = 0
         self.practice_range = None
 
@@ -725,6 +778,14 @@ class HudApp:
             self.preview_index = min(self.preview_index, len(self.preview_tl["evs"]) - 1)
         else:
             self.preview_index = 0
+        for refresh in list(getattr(self, "_map_refreshers", ())):
+            try:
+                refresh()
+            except tk.TclError:
+                try:
+                    self._map_refreshers.remove(refresh)
+                except ValueError:
+                    pass
 
     def open_map(self):
         if not self.song:
@@ -735,7 +796,47 @@ class HudApp:
         win.attributes("-topmost", True)
         px, py = self.panel.winfo_rootx(), self.panel.winfo_rooty()
         win.geometry("760x650%+d%+d" % (max(20, px - 180), max(20, py - 300)))
-        win.protocol("WM_DELETE_WINDOW", win.destroy)
+        def refresh_map():
+            nonlocal selecting
+            current = rows()
+            tree.delete(*tree.get_children())
+            for i, event in enumerate(current):
+                labels = ", ".join(CODES[n["key"]] for n in event["notes"])
+                tree.insert("", "end", iid=str(i), values=(i + 1, fmt_dur(event["t"]), labels))
+            total_now = len(current)
+            win.range_from_spin.configure(to=max(1, total_now))
+            win.range_to_spin.configure(to=max(1, total_now))
+            if total_now:
+                index = max(0, min(self.preview_index, total_now - 1))
+                self.preview_index = index
+                win.range_from.set(str(index + 1))
+                win.range_to.set(str(index + 1))
+                selecting = True
+                try:
+                    tree.selection_set(str(index))
+                    tree.focus(str(index))
+                    tree.see(str(index))
+                finally:
+                    selecting = False
+            else:
+                win.range_from.set("1")
+                win.range_to.set("1")
+
+        def close_map():
+            cleanup_map()
+            if win.winfo_exists():
+                win.destroy()
+
+        def cleanup_map(event=None):
+            if event is not None and event.widget is not win:
+                return
+            try:
+                self._map_refreshers.remove(refresh_map)
+            except ValueError:
+                pass
+
+        win.bind("<Destroy>", cleanup_map, add="+")
+        win.protocol("WM_DELETE_WINDOW", close_map)
         tk.Label(win, text="Карта песни · выберите ход для просмотра или отрезок для практики",
                  anchor="w", font=("Segoe UI", 11, "bold")).pack(fill="x", padx=10, pady=(10, 4))
         body = tk.Frame(win)
@@ -764,11 +865,13 @@ class HudApp:
         total = len(self.preview_tl["evs"])
         win.range_from = tk.StringVar(value=str(self.preview_index + 1))
         win.range_to = tk.StringVar(value=str(self.preview_index + 1))
-        tk.Spinbox(controls, from_=1, to=max(1, total), width=5,
-                   textvariable=win.range_from).pack(side="left", padx=3)
+        win.range_from_spin = tk.Spinbox(controls, from_=1, to=max(1, total), width=5,
+                                          textvariable=win.range_from)
+        win.range_from_spin.pack(side="left", padx=3)
         tk.Label(controls, text="—").pack(side="left")
-        tk.Spinbox(controls, from_=1, to=max(1, total), width=5,
-                   textvariable=win.range_to).pack(side="left", padx=3)
+        win.range_to_spin = tk.Spinbox(controls, from_=1, to=max(1, total), width=5,
+                                        textvariable=win.range_to)
+        win.range_to_spin.pack(side="left", padx=3)
         win.practice_button = tk.Button(controls, text="Ручная практика")
         win.practice_button.pack(side="left", padx=(8, 3))
         win.clear_practice_button = tk.Button(controls, text="Вся песня")
@@ -797,11 +900,20 @@ class HudApp:
             self._redraw()
 
         def changed(_event=None):
+            if selecting:
+                return
             selected = tree.selection()
             if selected:
                 index = int(selected[0])
-                if index != self.preview_index:
+                if index != self.preview_index or self.run:
                     select(index)
+
+        def clicked(event):
+            if selecting:
+                return
+            iid = tree.identify_row(event.y)
+            if iid and (self.run or int(iid) != self.preview_index):
+                select(int(iid))
 
         def move(delta):
             select(self.preview_index + delta)
@@ -836,10 +948,9 @@ class HudApp:
         win.practice_button.config(command=practice)
         win.clear_practice_button.config(command=clear_practice)
         tree.bind("<<TreeviewSelect>>", changed)
-        for i, event in enumerate(rows()):
-            labels = ", ".join(CODES[n["key"]] for n in event["notes"])
-            tree.insert("", "end", iid=str(i), values=(i + 1, fmt_dur(event["t"]), labels))
-        select(self.preview_index)
+        tree.bind("<ButtonRelease-1>", clicked)
+        self._map_refreshers.append(refresh_map)
+        refresh_map()
         return win
 
     def open_settings(self):
@@ -849,7 +960,16 @@ class HudApp:
         px, py = self.panel.winfo_rootx(), self.panel.winfo_rooty()
         win.geometry("430x320%+d+%d" % (max(20, px + 20), max(20, py + 20)))
         win._release = None
-        win._download_dir = None
+        cancelled = threading.Event()
+        jobs = []
+        def destroyed(event):
+            if event.widget is win:
+                cancelled.set()
+                for job in jobs:
+                    value = job.get("value")
+                    if job.get("install") and value:
+                        shutil.rmtree(value[0], ignore_errors=True)
+        win.bind("<Destroy>", destroyed, add="+")
         tk.Label(win, text="Настройки Sky HUD", font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=16, pady=(14, 4))
         win.creator_label = tk.Label(win, text="Создатель: @mafsolin", fg="#777", font=("Segoe UI", 9))
         win.creator_label.pack(anchor="w", padx=16)
@@ -867,7 +987,8 @@ class HudApp:
         win.install_button.pack(side="left", padx=(8, 0))
 
         def on_ui(callback):
-            result = {"done": False}
+            result: dict[str, Any] = {"done": False}
+            jobs.append(result)
             def poll():
                 if not win.winfo_exists():
                     return
@@ -920,25 +1041,14 @@ class HudApp:
             win.install_button.config(state="disabled", text="Скачиваю…")
             win.update_status.config(text="Скачивание и проверка пакета…", fg="#777")
             result = on_ui(lambda value, error: finish_install(value, error))
+            result["install"] = True
             def worker():
-                tmp_dir = tempfile.mkdtemp(prefix="sky-hud-update-")
-                package = os.path.join(tmp_dir, "SkyHUD-Update.zip")
                 try:
-                    req = urllib.request.Request(asset["browser_download_url"],
-                                                 headers={"Accept": "application/octet-stream", "User-Agent": "SkyHUD/%s" % APP_VERSION})
-                    with urllib.request.urlopen(req, timeout=60) as response, open(package, "wb") as target:
-                        shutil.copyfileobj(response, target)
-                    expected = str(asset.get("digest") or "")
-                    actual = _sha256(package)
-                    if expected.startswith("sha256:") and actual.lower() != expected.split(":", 1)[1].lower():
-                        raise ValueError("не совпал SHA-256 пакета")
-                    with zipfile.ZipFile(package) as archive:
-                        names = set(archive.namelist())
-                    if not {"SkyHUD.exe", "SkyHUD-Updater.exe"}.issubset(names):
-                        raise ValueError("в пакете нет EXE или updater")
-                    result["value"] = (tmp_dir, package)
+                    prepared = download_update(release)
+                    result["value"] = prepared
+                    if cancelled.is_set():
+                        shutil.rmtree(prepared[0], ignore_errors=True)
                 except Exception as exc:
-                    shutil.rmtree(tmp_dir, ignore_errors=True)
                     result["error"] = exc
                 finally:
                     result["done"] = True
@@ -950,11 +1060,11 @@ class HudApp:
                 win.install_button.config(state="normal", text="Обновиться")
                 win.update_status.config(text="Обновление не установлено: %s" % error, fg="#b00")
                 return
-            tmp_dir, package = value
-            updater = os.path.join(tmp_dir, "SkyHUD-Updater.exe")
+            tmp_dir = value[0]
             try:
-                subprocess.Popen([updater, "--pid", str(os.getpid()), "--package", package,
-                                  "--install-dir", APP_DIR], cwd=tmp_dir)
+                launch_update(value)
+                for job in jobs:
+                    job["install"] = False
                 win.update_status.config(text="Обновление подготовлено. Приложение перезапустится…", fg="#777")
                 self.quit()
             except Exception as exc:
