@@ -49,6 +49,10 @@ class HudTests(unittest.TestCase):
         hud.APP_DIR = self.original_app_dir
         self.tmp.cleanup()
 
+    def test_loop_is_enabled_by_default_for_new_settings(self):
+        self.assertTrue(self.app.loop_on)
+        self.assertTrue(self.app.v_loop.get())
+
     def test_sound_bus_shutdown_joins_worker(self):
         bus = hud.SoundBus()
         bus.close()

@@ -40,7 +40,7 @@ import sky_updater
 from sky_song_map import SongMapGrid
 
 APP_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 UPDATE_REPO = "Mafsolin/sky-hud"
 
 
@@ -353,7 +353,7 @@ class HudApp:
         self.mode = self.cfg.get("mode") if self.cfg.get("mode") in ("demo", "train", "step") else "train"
         self.metro_on = bool(self.cfg.get("metro", False))
         self.sound_on = bool(self.cfg.get("sound", False))
-        self.loop_on = bool(self.cfg.get("loop", False))
+        self.loop_on = bool(self.cfg.get("loop", True))
         parts_cfg = self.cfg.get("parts")
         self.part_sel = None if parts_cfg is None else set(parts_cfg)
         self.song = None
