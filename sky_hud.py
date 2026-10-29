@@ -40,7 +40,7 @@ import sky_updater
 from sky_song_map import SongMapGrid
 
 APP_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
-APP_VERSION = "1.1.4"
+APP_VERSION = "1.1.5"
 UPDATE_REPO = "Mafsolin/sky-hud"
 
 
@@ -815,13 +815,68 @@ class HudApp:
             total = len(rows())
             win.position_label.config(text="Ход %d / %d" % (self.preview_index + 1 if total else 0, total))
 
+        win.pick_mode = None
+        range_state = {"start": None, "end": None}
+        if self.practice_range is not None:
+            range_state["start"], range_state["end"] = self.practice_range
+
+        def active_range():
+            lo, hi = range_state["start"], range_state["end"]
+            if lo is None or hi is None:
+                return None
+            return (min(lo, hi), max(lo, hi))
+
+        def sync_range_spins():
+            total = len(rows())
+            current = max(0, min(self.preview_index, total - 1)) if total else 0
+            lo, hi = active_range() or (current, current)
+            win.range_from.set(str(lo + 1))
+            win.range_to.set(str(hi + 1))
+
+        def set_pick_buttons():
+            win.start_button.config(relief="sunken" if win.pick_mode == "start" else "raised")
+            win.end_button.config(relief="sunken" if win.pick_mode == "end" else "raised")
+
+        def apply_boundary(kind, index):
+            if kind == "start":
+                range_state["start"] = index
+                if range_state["end"] is None or range_state["end"] < index:
+                    range_state["end"] = index
+                win.pick_mode = None
+                set_pick_buttons()
+                self.status("Начало: ход %d · теперь нажмите «Конец»" % (index + 1))
+            else:
+                start = range_state["start"]
+                if start is None:
+                    start = range_state["start"] = index
+                if index < start:
+                    self.status("Конец должен быть не раньше начала", err=True)
+                    return
+                range_state["end"] = index
+                win.pick_mode = None
+                set_pick_buttons()
+                self.status("Отрезок %d–%d · нажмите «Ручная практика»" % (start + 1, index + 1))
+            sync_range_spins()
+
+        def begin_pick(kind):
+            if not rows():
+                return
+            win.pick_mode = kind
+            set_pick_buttons()
+            self.status("Кликните по ходу, который будет началом" if kind == "start"
+                        else "Кликните по ходу, который будет концом")
+
         def select(index):
             if not rows():
                 return
             self.stop()
             self.preview_index = max(0, min(index, len(rows()) - 1))
-            grid.select_step(self.preview_index, self.practice_range)
+            if win.pick_mode:
+                apply_boundary(win.pick_mode, self.preview_index)
+            grid.select_step(self.preview_index, active_range())
             update_position()
+            if win.pick_mode is None:
+                sync_range_spins()
             self._redraw()
 
         body = tk.Frame(win)
@@ -847,12 +902,18 @@ class HudApp:
         controls = tk.Frame(win)
         controls.pack(fill="x", padx=10, pady=(0, 10))
         tk.Label(controls, text="Практика ходов:").pack(side="left")
+        win.start_button = tk.Button(controls, text="Начало", width=8,
+                                     command=lambda: begin_pick("start"))
+        win.start_button.pack(side="left", padx=(6, 2))
+        win.end_button = tk.Button(controls, text="Конец", width=8,
+                                   command=lambda: begin_pick("end"))
+        win.end_button.pack(side="left", padx=(2, 8))
         win.range_from = tk.StringVar(value="1")
         win.range_to = tk.StringVar(value="1")
-        win.range_from_spin = tk.Spinbox(controls, from_=1, to=1, width=6, textvariable=win.range_from)
+        win.range_from_spin = tk.Spinbox(controls, from_=1, to=1, width=6, textvariable=win.range_from, state="readonly")
         win.range_from_spin.pack(side="left", padx=4)
         tk.Label(controls, text="—").pack(side="left")
-        win.range_to_spin = tk.Spinbox(controls, from_=1, to=1, width=6, textvariable=win.range_to)
+        win.range_to_spin = tk.Spinbox(controls, from_=1, to=1, width=6, textvariable=win.range_to, state="readonly")
         win.range_to_spin.pack(side="left", padx=4)
 
         def practice():
@@ -864,6 +925,9 @@ class HudApp:
             if start < 0 or end >= len(rows()) or start > end:
                 self.status("Неверный диапазон ходов", err=True)
                 return
+            range_state["start"], range_state["end"] = start, end
+            win.pick_mode = None
+            set_pick_buttons()
             self.practice_range = (start, end)
             self.mode = "step"
             select(start)
@@ -872,6 +936,9 @@ class HudApp:
         def clear_practice():
             self.stop()
             self.practice_range = None
+            range_state["start"] = range_state["end"] = None
+            win.pick_mode = None
+            set_pick_buttons()
             self.mode = "step"
             select(0)
             win.range_from.set("1")
@@ -886,11 +953,14 @@ class HudApp:
         def refresh_map():
             current = rows()
             index = max(0, min(self.preview_index, len(current) - 1))
+            if self.practice_range is None:
+                range_state["start"] = range_state["end"] = None
+            else:
+                range_state["start"], range_state["end"] = self.practice_range
             win.range_from_spin.configure(to=max(1, len(current)))
             win.range_to_spin.configure(to=max(1, len(current)))
-            win.range_from.set(str(index + 1))
-            win.range_to.set(str(index + 1))
-            grid.set_events(current, index, self.practice_range)
+            grid.set_events(current, index, active_range())
+            sync_range_spins()
             update_position()
 
         def cleanup_map(event=None):

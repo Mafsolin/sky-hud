@@ -122,6 +122,74 @@ class LiveMapTests(unittest.TestCase):
         finally:
             win.destroy()
 
+    def test_start_and_end_buttons_pick_range_by_clicking_cards(self):
+        self.app.set_song(self.song("range pick", [0, 1, 2, 3, 4, 5]))
+        self.app.mode = "step"
+        win = self.app.open_map()
+        win.geometry("900x680+10000+10000")
+        try:
+            self.root.update()
+            grid = win.map_grid
+            win.start_button.invoke()
+            self.assertEqual(win.pick_mode, "start")
+            self.click_card(grid, 2)
+            self.assertIsNone(win.pick_mode)
+            self.assertEqual((win.range_from.get(), win.range_to.get()), ("3", "3"))
+            self.assertEqual(grid.practice_range, (2, 2))
+            win.end_button.invoke()
+            self.assertEqual(win.pick_mode, "end")
+            self.click_card(grid, 5)
+            self.assertIsNone(win.pick_mode)
+            self.assertEqual((win.range_from.get(), win.range_to.get()), ("3", "6"))
+            self.assertEqual(grid.practice_range, (2, 5))
+            win.practice_button.invoke()
+            self.assertEqual(self.app.practice_range, (2, 5))
+            self.assertEqual(self.app.mode, "step")
+            self.app.start()
+            self.assertEqual([event["notes"][0]["key"] for event in self.app.run["tl"]["evs"]],
+                             [2, 3, 4, 5])
+        finally:
+            win.destroy()
+
+    def test_end_before_start_is_rejected_and_end_pick_stays_active(self):
+        self.app.set_song(self.song("bad range", [0, 1, 2, 3]))
+        win = self.app.open_map()
+        win.geometry("900x680+10000+10000")
+        try:
+            self.root.update()
+            grid = win.map_grid
+            win.start_button.invoke()
+            self.click_card(grid, 2)
+            win.end_button.invoke()
+            self.click_card(grid, 0)
+            self.assertEqual(win.pick_mode, "end")
+            self.assertEqual(grid.practice_range, (2, 2))
+            self.assertIn("раньше", self.app.lb_status.cget("text"))
+            self.click_card(grid, 3)
+            self.assertEqual(grid.practice_range, (2, 3))
+        finally:
+            win.destroy()
+
+    def test_clicking_card_without_pick_mode_does_not_change_practice_range(self):
+        self.app.set_song(self.song("plain click", [0, 1, 2, 3]))
+        win = self.app.open_map()
+        win.geometry("900x680+10000+10000")
+        try:
+            self.root.update()
+            grid = win.map_grid
+            win.start_button.invoke()
+            self.click_card(grid, 1)
+            self.click_card(grid, 3)
+            self.assertEqual(grid.practice_range, (1, 1))
+            self.assertEqual(self.app.preview_index, 3)
+        finally:
+            win.destroy()
+
+    @staticmethod
+    def click_card(grid, index):
+        x1, y1, _x2, _y2 = grid.coords(grid.rendered_cards[index]["body"])
+        grid.event_generate("<Button-1>", x=int(x1 + 20), y=int(y1 + 20 - grid.canvasy(0)))
+
     @staticmethod
     def song(name, keys):
         notes = []
