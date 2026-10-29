@@ -49,6 +49,34 @@ class HudTests(unittest.TestCase):
         hud.APP_DIR = self.original_app_dir
         self.tmp.cleanup()
 
+    def test_missing_songs_points_to_separate_songs_archive(self):
+        empty = Path(self.tmp.name) / "app-only"
+        empty.mkdir()
+        original = hud.APP_DIR
+        try:
+            hud.APP_DIR = str(empty)
+            self.app.song = None
+            self.app.load_demo()
+        finally:
+            hud.APP_DIR = original
+        self.assertIsNone(self.app.song)
+        self.assertIn("SkyHUD-Songs", self.app.lb_status.cget("text"))
+
+    def test_missing_demo_with_installed_songs_asks_to_pick_from_catalog(self):
+        appdir = Path(self.tmp.name) / "with-songs"
+        (appdir / "songs" / "Songs").mkdir(parents=True)
+        (appdir / "songs/Songs/x.txt").write_text(
+            '{"songNotes":[{"time":0,"key":"1Key0"}]}', encoding="utf-8")
+        original = hud.APP_DIR
+        try:
+            hud.APP_DIR = str(appdir)
+            self.app.song = None
+            self.app.load_demo()
+        finally:
+            hud.APP_DIR = original
+        self.assertIsNone(self.app.song)
+        self.assertIn("Каталог нот", self.app.lb_status.cget("text"))
+
     def test_new_settings_start_in_manual_step_mode(self):
         # Manual aid: Start must wait for the player's keys, not run the song by clock.
         self.assertEqual(self.app.mode, "step")

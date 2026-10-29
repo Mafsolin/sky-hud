@@ -40,7 +40,7 @@ import sky_updater
 from sky_song_map import SongMapGrid
 
 APP_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
-APP_VERSION = "1.1.5"
+APP_VERSION = "1.1.6"
 UPDATE_REPO = "Mafsolin/sky-hud"
 
 
@@ -1317,7 +1317,18 @@ class HudApp:
                 return
             except Exception:
                 pass
-        self.status("Файл «A cruel angel.txt» не найден рядом с программой", err=True)
+        if self._songs_installed():
+            self.status("Выберите песню в «Каталог нот» · песни лежат в папке songs")
+        else:
+            self.status("Песен нет · скачайте SkyHUD-Songs.zip и распакуйте в эту папку", err=True)
+
+    @staticmethod
+    def _songs_installed():
+        root = os.path.join(APP_DIR, "songs")
+        for _base, _dirs, files in os.walk(root):
+            if any(name.lower().endswith((".txt", ".json")) for name in files):
+                return True
+        return False
 
     def set_song(self, song, source_path=None):
         self.stop()
@@ -1806,6 +1817,14 @@ def fmt_dur(ms):
 
 
 # ---------------------------------------------------------------- самопроверка
+BUILTIN_CHECK_SONG = (
+    '{"name":"Проверка","songNotes":['
+    '{"time":0,"key":"1Key0"},{"time":250,"key":"2Key1"},'
+    '{"time":500,"key":"1Key2"},{"time":750,"key":"2Key3"},'
+    '{"time":1000,"key":"1Key4"},{"time":1250,"key":"2Key5"}]}'
+)
+
+
 def check_mode(paths):
     # Diagnostic output must not fail on Western Windows console encodings.
     if hasattr(sys.stdout, "reconfigure"):
@@ -1823,10 +1842,14 @@ def check_mode(paths):
             print(("PASS" if cond else "FAIL"), "|", safe_name, ("| " + str(extra)) if extra else "")
 
     for path in paths:
-        with open(path, "r", encoding="utf-8-sig") as f:
-            text = f.read()
-        song = parse_song(text, path)
-        t("parse %s" % os.path.basename(path), song["name"] != "")
+        if path is None:
+            text, label = BUILTIN_CHECK_SONG, "встроенный пример"
+        else:
+            with open(path, "r", encoding="utf-8-sig") as f:
+                text = f.read()
+            label = os.path.basename(path)
+        song = parse_song(text, label)
+        t("parse %s" % label, song["name"] != "")
         for p in song["parts"]:
             print("   part %s: %d notes, kind=%s" % (p["id"], len(p["notes"]), p["kind"]))
         ids = [p["id"] for p in song["parts"]]
@@ -1889,7 +1912,16 @@ def smoke_mode():
 def main():
     args = sys.argv[1:]
     if args and args[0] == "--check":
-        paths = args[1:] or [os.path.join(APP_DIR, "A cruel angel.txt")]
+        paths = args[1:]
+        if not paths:
+            demo = os.path.join(APP_DIR, "A cruel angel.txt")
+            if os.path.exists(demo):
+                paths = [demo]
+            else:
+                installed = [os.path.join(base, name)
+                             for base, _dirs, files in os.walk(os.path.join(APP_DIR, "songs"))
+                             for name in files if name.lower().endswith((".txt", ".json"))]
+                paths = sorted(installed)[:1] or [None]
         check_mode(paths)
     elif args and args[0] == "--smoke":
         smoke_mode()

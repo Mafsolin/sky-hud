@@ -40,6 +40,22 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(check.returncode, 0, check.stderr)
         self.assertIn(b"ALL PASS", check.stdout)
 
+    def test_cli_check_works_in_app_only_folder_without_songs(self):
+        import shutil
+        import subprocess
+        import sys
+        folder = self.base / "app-only"
+        folder.mkdir()
+        for name in ("sky_hud.py", "sky_updater.py", "sky_song_map.py"):
+            shutil.copy2(Path(hud.__file__).with_name(name), folder / name)
+        env = dict(os.environ, PYTHONIOENCODING="utf-8")
+        check = subprocess.run([sys.executable, str(folder / "sky_hud.py"), "--check"],
+                               cwd=folder, env=env, capture_output=True, timeout=20)
+        self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+        self.assertIn(b"ALL PASS", check.stdout)
+        self.assertFalse((folder / "A cruel angel.txt").exists())
+        self.assertFalse((folder / "songs").exists())
+
     def test_verified_download_contains_extracted_updater(self):
         with patch.object(hud.urllib.request, "urlopen", return_value=io.BytesIO(self.data)):
             work, package, sidecar, digest = hud.download_update(self.release, work_root=self.base)
