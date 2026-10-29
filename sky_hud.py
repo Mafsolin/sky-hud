@@ -40,7 +40,7 @@ import sky_updater
 from sky_song_map import SongMapGrid
 
 APP_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 UPDATE_REPO = "Mafsolin/sky-hud"
 
 
@@ -625,7 +625,8 @@ class HudApp:
         self.cb_metro = tk.Checkbutton(f2, text="Метроном", variable=self.v_metro, command=self._on_cfg)
         self.cb_metro.pack(side="left")
         tk.Checkbutton(f2, text="Звук", variable=self.v_sound, command=self._on_cfg).pack(side="left")
-        tk.Checkbutton(f2, text="Повтор", variable=self.v_loop, command=self._on_cfg).pack(side="left")
+        self.cb_loop = tk.Checkbutton(f2, text="Повтор (цикл)", variable=self.v_loop, command=self._on_cfg)
+        self.cb_loop.pack(side="left")
         tk.Label(f2, text="Темп").pack(side="left", padx=(10, 2))
         self.v_tempo = tk.StringVar(value=str(self.tempo))
         cb = tk.OptionMenu(f2, self.v_tempo, "0.5", "0.75", "1", "1.25", "1.5", command=lambda _: self._on_cfg())

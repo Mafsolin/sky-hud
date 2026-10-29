@@ -637,6 +637,57 @@ class HudTests(unittest.TestCase):
         self.assertIsNot(self.app.run, old_run)
         self.assertEqual(self.app.run["step_idx"], 0)
 
+    def test_loop_restarts_selected_manual_practice_range_from_first_fragment(self):
+        song = hud.parse_song('{"songNotes":['
+                              '{"time":0,"key":"1Key0"},'
+                              '{"time":250,"key":"1Key1"},'
+                              '{"time":500,"key":"1Key2"},'
+                              '{"time":750,"key":"1Key3"}]}')
+        self.app.set_song(song)
+        self.app.mode = "step"
+        self.app.practice_range = (1, 2)
+        self.app.loop_on = True
+        self.app.start()
+        first_run = self.app.run
+        self.assertEqual([event["t"] for event in first_run["tl"]["evs"]], [0, 250])
+        self.app._judge_step(1)
+        self.app._judge_step(2)
+        self.assertIsNotNone(self.app.run)
+        self.assertIsNot(self.app.run, first_run)
+        self.assertEqual(self.app.run["step_idx"], 0)
+        self.assertEqual([event["t"] for event in self.app.run["tl"]["evs"]], [0, 250])
+
+    def test_loop_restarts_timed_run_from_first_event(self):
+        song = hud.parse_song('{"songNotes":['
+                              '{"time":0,"key":"1Key0"},'
+                              '{"time":250,"key":"1Key1"}]}')
+        self.app.set_song(song)
+        self.app.mode = "train"
+        self.app.loop_on = True
+        self.app.start()
+        self.app.song_time_ms = lambda: self.app.run["tl"]["end_t"] + 601
+        old_run = self.app.run
+        self.app._tick_inner()
+        self.assertIsNotNone(self.app.run)
+        self.assertIsNot(self.app.run, old_run)
+        self.assertEqual(self.app.run["ev_idx"], 0)
+
+    def test_loop_can_be_disabled_after_a_running_manual_practice_cycle(self):
+        song = hud.parse_song('{"songNotes":[{"time":0,"key":"1Key0"}]}')
+        self.app.set_song(song)
+        self.app.mode = "step"
+        self.app.practice_range = (0, 0)
+        self.app.loop_on = True
+        self.app.start()
+        self.app._judge_step(0)
+        self.assertIsNotNone(self.app.run)
+        self.app.loop_on = False
+        self.app._judge_step(0)
+        self.assertIsNone(self.app.run)
+
+    def test_loop_checkbox_is_explicitly_labeled_as_cycle(self):
+        self.assertEqual(self.app.cb_loop.cget("text"), "Повтор (цикл)")
+
     def test_timeline_deduplicates_same_physical_key_across_parts(self):
         song = hud.parse_song('{"songNotes":['
                               '{"time":0,"key":"1Key0"},'
