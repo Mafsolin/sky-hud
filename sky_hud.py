@@ -40,7 +40,7 @@ import sky_updater
 from sky_song_map import SongMapGrid
 
 APP_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.1.4"
 UPDATE_REPO = "Mafsolin/sky-hud"
 
 
@@ -350,7 +350,11 @@ class HudApp:
         self.scale = float(self.cfg.get("scale", 1.0))
         self.alpha = float(self.cfg.get("alpha", 0.85))
         self.tempo = float(self.cfg.get("tempo", 1.0))
-        self.mode = self.cfg.get("mode") if self.cfg.get("mode") in ("demo", "train", "step") else "train"
+        # Ручная помощь: по умолчанию и для старых настроек — пошаговый режим,
+        # где ход меняется только после нажатия игрока. Таймерный «train» больше
+        # не включается сам: старые конфиги с mode="train" открываются в «step».
+        saved_mode = self.cfg.get("mode")
+        self.mode = "demo" if saved_mode == "demo" else "step"
         self.metro_on = bool(self.cfg.get("metro", False))
         self.sound_on = bool(self.cfg.get("sound", False))
         self.loop_on = bool(self.cfg.get("loop", True))
@@ -868,7 +872,7 @@ class HudApp:
         def clear_practice():
             self.stop()
             self.practice_range = None
-            self.mode = "train"
+            self.mode = "step"
             select(0)
             win.range_from.set("1")
             win.range_to.set("1")

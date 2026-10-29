@@ -49,6 +49,56 @@ class HudTests(unittest.TestCase):
         hud.APP_DIR = self.original_app_dir
         self.tmp.cleanup()
 
+    def test_new_settings_start_in_manual_step_mode(self):
+        # Manual aid: Start must wait for the player's keys, not run the song by clock.
+        self.assertEqual(self.app.mode, "step")
+        self.assertEqual(self.app.run, None)
+
+    def test_start_waits_for_keypress_instead_of_advancing_by_time(self):
+        song = hud.parse_song('{"songNotes":['
+                              '{"time":0,"key":"1Key0"},'
+                              '{"time":250,"key":"1Key1"},'
+                              '{"time":500,"key":"1Key2"}]}')
+        self.app.set_song(song)
+        self.app.start()
+        self.assertIsNotNone(self.app.run)
+        self.assertEqual(self.app.run["mode"], "step")
+        # Делаем вид, что прошло очень много времени: время не должно двигать ход.
+        self.app.song_time_ms = lambda: 10 ** 9
+        for _ in range(5):
+            self.app._tick_inner()
+        self.assertEqual(self.app.run["step_idx"], 0)
+        self.assertEqual(self.app.run["ev_idx"], 0)
+        self.assertEqual(self.app.run["stats"]["miss"], 0)
+
+    def test_wrong_key_does_not_advance_manual_step(self):
+        song = hud.parse_song('{"songNotes":[{"time":0,"key":"1Key0"},'
+                              '{"time":250,"key":"1Key1"}]}')
+        self.app.set_song(song)
+        self.app.start()
+        self.app._judge_step(1)
+        self.assertEqual(self.app.run["step_idx"], 0)
+        self.assertEqual(self.app.run["stats"]["bad"], 1)
+        self.app._judge_step(0)
+        self.assertEqual(self.app.run["step_idx"], 1)
+
+    def test_whole_song_practice_keeps_manual_step_mode(self):
+        song = hud.parse_song('{"songNotes":[{"time":0,"key":"1Key0"},'
+                              '{"time":250,"key":"1Key1"}]}')
+        self.app.set_song(song)
+        win = self.app.open_map()
+        win.geometry("+10000+10000")
+        try:
+            win.practice_button.invoke()
+            self.assertEqual(self.app.mode, "step")
+            win.clear_practice_button.invoke()
+            self.assertEqual(self.app.mode, "step")
+            self.assertIsNone(self.app.practice_range)
+            self.app.start()
+            self.assertEqual(self.app.run["mode"], "step")
+        finally:
+            win.destroy()
+
     def test_loop_is_enabled_by_default_for_new_settings(self):
         self.assertTrue(self.app.loop_on)
         self.assertTrue(self.app.v_loop.get())
