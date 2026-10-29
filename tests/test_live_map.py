@@ -39,6 +39,89 @@ class LiveMapTests(unittest.TestCase):
         hud.APP_DIR = self.original_app_dir
         self.tmp.cleanup()
 
+    def test_map_steps_are_rectangular_five_by_three_grids(self):
+        song = hud.parse_song(json.dumps({"songNotes": [
+            {"time": 0, "key": "1Key0"}, {"time": 0, "key": "1Key7"},
+            {"time": 0, "key": "1Key14"}, {"time": 250, "key": "1Key3"}]}))
+        self.app.set_song(song)
+        win = self.app.open_map()
+        win.geometry("760x650+10000+10000")
+        try:
+            self.root.update()
+            grid = win.map_grid
+            self.assertEqual(grid.step_count, 2)
+            card = grid.rendered_cards[0]
+            self.assertEqual(len(card["keys"]), 15)
+            self.assertEqual([grid.itemcget(i, "text") for i in card["labels"]], hud.CODES)
+            positions = [grid.coords(i) for i in card["keys"]]
+            self.assertEqual(len({p[0] for p in positions}), 5)
+            self.assertEqual(len({p[1] for p in positions}), 3)
+            for key, item in enumerate(card["keys"]):
+                self.assertEqual(grid.type(item), "rectangle")
+                self.assertEqual(grid.itemcget(item, "fill"),
+                    hud.HudApp.HUD_COLORS["now"] if key in (0, 7, 14) else hud.HudApp.HUD_COLORS["key"])
+            self.assertFalse(any(isinstance(w, hud.ttk.Treeview) for w in win.winfo_children()))
+        finally:
+            win.destroy()
+
+    def test_long_map_renders_only_visible_grids_and_can_reach_last_step(self):
+        self.app.set_song(self.song("long", [i % 15 for i in range(5000)]))
+        win = self.app.open_map()
+        win.geometry("760x650+10000+10000")
+        try:
+            self.root.update()
+            grid = win.map_grid
+            self.assertEqual(grid.step_count, 5000)
+            self.assertLess(len(grid.rendered_cards), 100)
+            win.select_step(4999)
+            self.root.update()
+            self.assertIn(4999, grid.rendered_cards)
+            self.assertEqual(self.app.preview_index, 4999)
+            self.assertIsNone(self.app.run)
+            self.assertLess(len(grid.rendered_cards), 100)
+        finally:
+            win.destroy()
+
+    def test_clicking_card_selects_step_and_stops_run(self):
+        self.app.set_song(self.song("click cards", [0, 7, 14]))
+        self.app.mode = "step"
+        win = self.app.open_map()
+        win.geometry("760x650+10000+10000")
+        try:
+            self.root.update()
+            grid = win.map_grid
+            for step in (1, 1, 0):
+                self.app.start()
+                self.assertIsNotNone(self.app.run)
+                x1, y1, x2, y2 = grid.coords(grid.rendered_cards[step]["body"])
+                grid.event_generate("<Button-1>", x=int(x1 + 20), y=int(y1 + 20 - grid.canvasy(0)))
+                self.root.update()
+                self.assertEqual(self.app.preview_index, step)
+                self.assertEqual(grid.selected_index, step)
+                self.assertIsNone(self.app.run)
+            win.range_from.set("1")
+            win.range_to.set("2")
+            win.practice_button.invoke()
+            self.assertEqual(grid.practice_range, (0, 1))
+        finally:
+            win.destroy()
+
+    def test_first_step_is_fully_visible_when_map_opens_and_resizes(self):
+        self.app.set_song(self.song("viewport", [i % 15 for i in range(100)]))
+        win = self.app.open_map()
+        win.geometry("760x650+10000+10000")
+        try:
+            self.root.update()
+            grid = win.map_grid
+            first_top = grid.coords(grid.rendered_cards[0]["body"])[1]
+            self.assertLessEqual(grid.canvasy(0), first_top)
+            win.select_step(80)
+            win.geometry("1000x650+10000+10000")
+            self.root.update()
+            self.assertIn(80, grid.rendered_cards)
+        finally:
+            win.destroy()
+
     @staticmethod
     def song(name, keys):
         notes = []
@@ -55,10 +138,7 @@ class LiveMapTests(unittest.TestCase):
             self.app._judge_step(0)
             self.assertEqual(self.app.run["step_idx"], 1)
             self.assertEqual(self.app.preview_index, 0)
-            row = win.map_tree.get_children()[0]
-            win.map_tree.selection_set(row)
-            win.map_tree.focus(row)
-            win.map_tree.event_generate("<<TreeviewSelect>>")
+            win.select_step(0)
             self.root.update()
             self.assertIsNone(self.app.run)
             self.assertEqual(self.app.preview_index, 0)
@@ -77,12 +157,12 @@ class LiveMapTests(unittest.TestCase):
         self.app.set_song(self.song("first", [0, 1, 2]))
         win = self.app.open_map()
         try:
-            self.assertEqual(len(win.map_tree.get_children()), 3)
+            self.assertEqual(win.map_grid.step_count, 3)
             self.app.set_song(self.song("second", [10, 11]))
             self.root.update()
-            rows = win.map_tree.get_children()
+            rows = list(range(win.map_grid.step_count))
             self.assertEqual(len(rows), 2)
-            self.assertEqual(win.map_tree.item(rows[0], "values")[2], "N")
+            self.assertEqual(win.map_grid.events[0]["notes"][0]["key"], 10)
             self.assertEqual(win.range_to.get(), "1")
         finally:
             win.destroy()
@@ -94,14 +174,14 @@ class LiveMapTests(unittest.TestCase):
         self.app.set_song(song)
         win = self.app.open_map()
         try:
-            self.assertEqual(len(win.map_tree.get_children()), 3)
+            self.assertEqual(win.map_grid.step_count, 3)
             var = self.app.part_vars["2"]
             var.set(False)
             self.app._toggle_part("2", var)
             self.root.update()
-            rows = win.map_tree.get_children()
+            rows = list(range(win.map_grid.step_count))
             self.assertEqual(len(rows), 2)
-            self.assertEqual(win.map_tree.item(rows[1], "values")[2], "I")
+            self.assertEqual(win.map_grid.events[1]["notes"][0]["key"], 2)
         finally:
             win.destroy()
 

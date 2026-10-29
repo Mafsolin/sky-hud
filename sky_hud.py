@@ -37,9 +37,10 @@ import urllib.request
 import winsound
 import zipfile
 import sky_updater
+from sky_song_map import SongMapGrid
 
 APP_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 UPDATE_REPO = "Mafsolin/sky-hud"
 
 
@@ -795,140 +796,69 @@ class HudApp:
         win.title("Sky HUD · карта песни")
         win.attributes("-topmost", True)
         px, py = self.panel.winfo_rootx(), self.panel.winfo_rooty()
-        win.geometry("760x650%+d%+d" % (max(20, px - 180), max(20, py - 300)))
-        def refresh_map():
-            nonlocal selecting
-            current = rows()
-            tree.delete(*tree.get_children())
-            for i, event in enumerate(current):
-                labels = ", ".join(CODES[n["key"]] for n in event["notes"])
-                tree.insert("", "end", iid=str(i), values=(i + 1, fmt_dur(event["t"]), labels))
-            total_now = len(current)
-            win.range_from_spin.configure(to=max(1, total_now))
-            win.range_to_spin.configure(to=max(1, total_now))
-            if total_now:
-                index = max(0, min(self.preview_index, total_now - 1))
-                self.preview_index = index
-                win.range_from.set(str(index + 1))
-                win.range_to.set(str(index + 1))
-                selecting = True
-                try:
-                    tree.selection_set(str(index))
-                    tree.focus(str(index))
-                    tree.see(str(index))
-                finally:
-                    selecting = False
-            else:
-                win.range_from.set("1")
-                win.range_to.set("1")
-
-        def close_map():
-            cleanup_map()
-            if win.winfo_exists():
-                win.destroy()
-
-        def cleanup_map(event=None):
-            if event is not None and event.widget is not win:
-                return
-            try:
-                self._map_refreshers.remove(refresh_map)
-            except ValueError:
-                pass
-
-        win.bind("<Destroy>", cleanup_map, add="+")
-        win.protocol("WM_DELETE_WINDOW", close_map)
-        tk.Label(win, text="Карта песни · выберите ход для просмотра или отрезок для практики",
-                 anchor="w", font=("Segoe UI", 11, "bold")).pack(fill="x", padx=10, pady=(10, 4))
-        body = tk.Frame(win)
-        body.pack(fill="both", expand=True, padx=10, pady=4)
-        tree = ttk.Treeview(body, columns=("number", "time", "notes"), show="headings", selectmode="browse")
-        tree.heading("number", text="#")
-        tree.heading("time", text="Время")
-        tree.heading("notes", text="Клавиши")
-        tree.column("number", width=55, stretch=False, anchor="center")
-        tree.column("time", width=100, stretch=False, anchor="center")
-        tree.column("notes", width=540, anchor="w")
-        tree.pack(side="left", fill="both", expand=True)
-        scrollbar = ttk.Scrollbar(body, orient="vertical", command=tree.yview)
-        scrollbar.pack(side="right", fill="y")
-        tree.configure(yscrollcommand=scrollbar.set)
-        win.map_tree = tree
-        selecting = False
-
-        controls = tk.Frame(win)
-        controls.pack(fill="x", padx=10, pady=(4, 10))
-        win.previous_button = tk.Button(controls, text="← Предыдущий")
-        win.previous_button.pack(side="left")
-        win.next_button = tk.Button(controls, text="Следующий →")
-        win.next_button.pack(side="left", padx=(5, 12))
-        tk.Label(controls, text="Практика ходов:").pack(side="left")
-        total = len(self.preview_tl["evs"])
-        win.range_from = tk.StringVar(value=str(self.preview_index + 1))
-        win.range_to = tk.StringVar(value=str(self.preview_index + 1))
-        win.range_from_spin = tk.Spinbox(controls, from_=1, to=max(1, total), width=5,
-                                          textvariable=win.range_from)
-        win.range_from_spin.pack(side="left", padx=3)
-        tk.Label(controls, text="—").pack(side="left")
-        win.range_to_spin = tk.Spinbox(controls, from_=1, to=max(1, total), width=5,
-                                        textvariable=win.range_to)
-        win.range_to_spin.pack(side="left", padx=3)
-        win.practice_button = tk.Button(controls, text="Ручная практика")
-        win.practice_button.pack(side="left", padx=(8, 3))
-        win.clear_practice_button = tk.Button(controls, text="Вся песня")
-        win.clear_practice_button.pack(side="left")
+        vx, vy, vw, vh = self._desktop_bounds()
+        x, y = max(vx + 20, min(px - 180, vx + vw - 940)), max(vy + 20, min(py - 220, vy + vh - 740))
+        win.geometry("900x680%+d%+d" % (x, y))
+        win.minsize(700, 430)
+        tk.Label(win, text="Карта песни · один ход — сетка 5 × 3 · нажмите на нужный ход",
+                 anchor="w", font=("Segoe UI", 11, "bold")).pack(fill="x", padx=12, pady=(10, 6))
 
         def rows():
             return self.preview_tl["evs"] if self.preview_tl else []
 
+        def update_position():
+            total = len(rows())
+            win.position_label.config(text="Ход %d / %d" % (self.preview_index + 1 if total else 0, total))
+
         def select(index):
-            nonlocal selecting
-            count = len(rows())
-            if not count:
+            if not rows():
                 return
-            index = max(0, min(index, count - 1))
             self.stop()
-            self.preview_index = index
-            iid = str(index)
-            if iid in tree.get_children():
-                selecting = True
-                try:
-                    tree.selection_set(iid)
-                    tree.focus(iid)
-                    tree.see(iid)
-                finally:
-                    selecting = False
+            self.preview_index = max(0, min(index, len(rows()) - 1))
+            grid.select_step(self.preview_index, self.practice_range)
+            update_position()
             self._redraw()
 
-        def changed(_event=None):
-            if selecting:
-                return
-            selected = tree.selection()
-            if selected:
-                index = int(selected[0])
-                if index != self.preview_index or self.run:
-                    select(index)
+        body = tk.Frame(win)
+        body.pack(fill="both", expand=True, padx=10, pady=4)
+        grid = SongMapGrid(body, self.HUD_COLORS, CODES, select)
+        grid.pack(side="left", fill="both", expand=True)
+        scrollbar = ttk.Scrollbar(body, orient="vertical", command=grid.yview)
+        scrollbar.pack(side="right", fill="y")
+        grid.configure(yscrollcommand=scrollbar.set)
+        win.map_grid = grid
+        win.select_step = select
 
-        def clicked(event):
-            if selecting:
-                return
-            iid = tree.identify_row(event.y)
-            if iid and (self.run or int(iid) != self.preview_index):
-                select(int(iid))
+        navigation = tk.Frame(win)
+        navigation.pack(fill="x", padx=10, pady=(5, 4))
+        win.previous_button = tk.Button(navigation, text="← Предыдущий", command=lambda: select(self.preview_index - 1))
+        win.previous_button.pack(side="left")
+        win.next_button = tk.Button(navigation, text="Следующий →", command=lambda: select(self.preview_index + 1))
+        win.next_button.pack(side="left", padx=6)
+        win.position_label = tk.Label(navigation, text="", anchor="w")
+        win.position_label.pack(side="left", padx=8)
+        tk.Label(navigation, text="Голубая рамка — выбранный ход · золотые — клавиши", fg="#666").pack(side="right")
 
-        def move(delta):
-            select(self.preview_index + delta)
+        controls = tk.Frame(win)
+        controls.pack(fill="x", padx=10, pady=(0, 10))
+        tk.Label(controls, text="Практика ходов:").pack(side="left")
+        win.range_from = tk.StringVar(value="1")
+        win.range_to = tk.StringVar(value="1")
+        win.range_from_spin = tk.Spinbox(controls, from_=1, to=1, width=6, textvariable=win.range_from)
+        win.range_from_spin.pack(side="left", padx=4)
+        tk.Label(controls, text="—").pack(side="left")
+        win.range_to_spin = tk.Spinbox(controls, from_=1, to=1, width=6, textvariable=win.range_to)
+        win.range_to_spin.pack(side="left", padx=4)
 
         def practice():
             try:
-                start = int(win.range_from.get()) - 1
-                end = int(win.range_to.get()) - 1
+                start, end = int(win.range_from.get()) - 1, int(win.range_to.get()) - 1
             except (TypeError, ValueError):
                 self.status("Укажите номера ходов", err=True)
                 return
             if start < 0 or end >= len(rows()) or start > end:
                 self.status("Неверный диапазон ходов", err=True)
                 return
-            self.stop()
             self.practice_range = (start, end)
             self.mode = "step"
             select(start)
@@ -943,12 +873,31 @@ class HudApp:
             win.range_to.set("1")
             self.status("Выбрана вся песня · нажмите «Старт»")
 
-        win.previous_button.config(command=lambda: move(-1))
-        win.next_button.config(command=lambda: move(1))
-        win.practice_button.config(command=practice)
-        win.clear_practice_button.config(command=clear_practice)
-        tree.bind("<<TreeviewSelect>>", changed)
-        tree.bind("<ButtonRelease-1>", clicked)
+        win.practice_button = tk.Button(controls, text="Ручная практика", command=practice)
+        win.practice_button.pack(side="left", padx=(8, 4))
+        win.clear_practice_button = tk.Button(controls, text="Вся песня", command=clear_practice)
+        win.clear_practice_button.pack(side="left")
+
+        def refresh_map():
+            current = rows()
+            index = max(0, min(self.preview_index, len(current) - 1))
+            win.range_from_spin.configure(to=max(1, len(current)))
+            win.range_to_spin.configure(to=max(1, len(current)))
+            win.range_from.set(str(index + 1))
+            win.range_to.set(str(index + 1))
+            grid.set_events(current, index, self.practice_range)
+            update_position()
+
+        def cleanup_map(event=None):
+            if event is not None and event.widget is not win:
+                return
+            try:
+                self._map_refreshers.remove(refresh_map)
+            except ValueError:
+                pass
+
+        win.bind("<Destroy>", cleanup_map, add="+")
+        win.protocol("WM_DELETE_WINDOW", win.destroy)
         self._map_refreshers.append(refresh_map)
         refresh_map()
         return win
