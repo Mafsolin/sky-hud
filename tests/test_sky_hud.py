@@ -50,6 +50,110 @@ class HudTests(unittest.TestCase):
         hud.APP_DIR = self.original_app_dir
         self.tmp.cleanup()
 
+    def test_round3_slider_hover_and_hud_theme(self):
+        for theme in ("dark", "light"):
+            self.app.set_theme(theme)
+            self.root.update()
+            def luminance(color):
+                rgb = [int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+                rgb = [v / 12.92 if v <= .04045 else ((v + .055) / 1.055) ** 2.4 for v in rgb]
+                return sum(v * w for v, w in zip(rgb, (.2126, .7152, .0722)))
+            def contrast(a, b):
+                lo, hi = sorted((luminance(a), luminance(b)))
+                return (hi + .05) / (lo + .05)
+            for slider in (self.app.s_scale, self.app.s_alpha):
+                self.assertNotEqual(slider.cget("activebackground"), slider.cget("troughcolor"))
+                self.assertNotEqual(slider.cget("activebackground"), slider.cget("bg"))
+                self.assertGreater(contrast(slider.cget("activebackground"), slider.cget("troughcolor")), 2)
+                self.assertNotEqual(slider.cget("bg"), slider.cget("troughcolor"))
+            colors = self.app.hud_colors()
+            self.assertEqual(colors["transparent"], "#0b1230")
+            if theme == "dark":
+                self.assertEqual(colors, self.app.HUD_COLORS)
+            else:
+                self.assertNotEqual(colors["panel"], self.app.HUD_COLORS["panel"])
+                self.assertEqual(colors["text"], "#1c2430")
+            self.app._build_items()
+            self.app._animate_items()
+            self.assertEqual(self.app.cv.itemcget(self.app._it["body"][0][14], "fill"), colors["key"])
+
+    def test_round3_catalog_no_hint_and_song_menu(self):
+        win = self.app.open_catalog()
+        try:
+            self.root.update()
+            def labels(widget):
+                return ([widget.cget("text")] if widget.winfo_class() == "Label" else []) + [x for child in widget.winfo_children() for x in labels(child)]
+            self.assertFalse(any("избранное на первой странице" in text for text in labels(win)))
+            self.assertEqual(win.catalog_song_menu.entrycget(0, "label"), "Переименовать…")
+        finally:
+            win.destroy()
+
+    def test_round3_rename_updates_references_and_rejects_invalid(self):
+        source = Path(hud.APP_DIR) / "songs/Songs/A/alpha.txt"
+        self.app.load_song_file(str(source))
+        old = self.app.song_path
+        self.app.toggle_favorite(str(source))
+        win = self.app.open_catalog()
+        try:
+            self.root.update()
+            for invalid in ("", " ... ", "bad/name", "bad:name", "BETA"):
+                self.assertFalse(self.app.rename_song(str(source), invalid))
+                self.assertTrue(source.exists())
+            self.assertTrue(self.app.rename_song(str(source), "Renamed"))
+            dest = source.with_name("Renamed.txt")
+            new = hud.song_path_key(str(dest))
+            self.assertTrue(dest.exists())
+            self.assertFalse(source.exists())
+            self.assertNotIn(old, self.app.favorites)
+            self.assertIn(new, self.app.favorites)
+            self.assertEqual(self.app.song_path, new)
+            self.assertEqual(self.app.cfg["last_song"], new)
+            self.assertEqual(self.app.lb_song.cget("text"), "Renamed")
+            self.assertTrue(any(row[1] == str(dest) for row in win.catalog_arr))
+        finally:
+            win.destroy()
+
+    def test_round3_rename_preserves_search_page_and_handles_oserror(self):
+        folder = Path(hud.APP_DIR) / "songs/Songs/A"
+        source = folder / "alpha.txt"
+        with patch.object(hud.HudApp, "CATALOG_LIMIT", 1):
+            win = self.app.open_catalog()
+            try:
+                win.catalog_query.set("a")
+                win.catalog_goto_page(1)
+                page = win.catalog_page
+                with patch.object(hud.os, "rename", side_effect=OSError("denied")):
+                    self.assertFalse(self.app.rename_song(str(source), "another"))
+                self.assertIn("denied", self.app.lb_status.cget("text"))
+                self.assertTrue(source.exists())
+                self.assertTrue(self.app.rename_song(str(source), "aardvark"))
+                self.assertEqual(win.catalog_query.get(), "a")
+                self.assertEqual(win.catalog_page, page)
+            finally:
+                win.destroy()
+
+    def test_round3_song_context_menu_targets_clicked_row(self):
+        win = self.app.open_catalog()
+        try:
+            win.geometry("620x700+10000+10000")
+            win.catalog_goto_page(1)
+            self.root.update()
+            tree = win.catalog_tree
+            iid = tree.get_children()[0]
+            x, y, w, h = tree.bbox(iid)
+            with patch.object(win.catalog_song_menu, "tk_popup") as popup:
+                tree.event_generate("<Button-3>", x=x + 10, y=y + h // 2)
+                self.root.update()
+                popup.assert_called_once()
+            self.assertEqual(tree.selection(), (iid,))
+            expected = win.catalog_arr[int(iid)][1]
+            with patch.object(hud.simpledialog, "askstring", return_value=None) as dialog:
+                win.catalog_song_menu.invoke(0)
+                self.assertEqual(dialog.call_args.kwargs["initialvalue"], Path(expected).stem)
+            self.assertEqual(win.catalog_menu.entrycget(0, "label"), "Вставить")
+        finally:
+            win.destroy()
+
     def test_theme_live_persistence_and_system(self):
         for theme, dark in (("light", 0), ("dark", 1)):
             self.app.set_theme(theme)

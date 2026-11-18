@@ -30,7 +30,7 @@ import threading
 import time
 import tkinter as tk
 from typing import Any
-from tkinter import filedialog, ttk
+from tkinter import filedialog, simpledialog, ttk
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -726,6 +726,7 @@ class HudApp:
         self.palette = THEMES[self.theme]
         pal = self.palette
         self._configure_ttk_theme()
+        self._redraw()
         self.panel.option_add("*TCombobox*Listbox.background", pal["panel"])
         self.panel.option_add("*TCombobox*Listbox.foreground", pal["text"])
         self.panel.option_add("*TCombobox*Listbox.selectBackground", pal["select"])
@@ -755,6 +756,8 @@ class HudApp:
             for child in widget.winfo_children():
                 recolor(child)
         recolor(self.panel)
+        for slider in (self.s_scale, self.s_alpha):
+            slider.configure(bg=pal["button"], troughcolor=pal["scale"], activebackground=pal["accent"])
         self.lb_go.configure(bg=pal["accent"], fg=("#182733" if self.theme == "dark" else "#ffffff"))
         labels = {"system": "Системная", "light": "Светлая", "dark": "Тёмная"}
         for window in self.panel.winfo_children():
@@ -879,7 +882,7 @@ class HudApp:
                                 showvalue=False, command=lambda v: self._set_scale(float(v)),
                                 bg=pal["button"], fg=pal["text"], troughcolor=pal["scale"],
                                 highlightthickness=0, bd=1, width=12, sliderlength=22,
-                                sliderrelief="flat", activebackground=pal["button_active"])
+                                sliderrelief="flat", activebackground=pal["accent"])
         self.s_scale.set(self.scale)
         self.s_scale.pack(side="left", fill="x", expand=True)
         tk.Label(f3, text="Прозрачность", bg=pal["bg"], fg=pal["text"], font=("Segoe UI", 9)).pack(side="left", padx=(8, 0))
@@ -887,7 +890,7 @@ class HudApp:
                                 showvalue=False, command=self._set_alpha,
                                 bg=pal["button"], fg=pal["text"], troughcolor=pal["scale"],
                                 highlightthickness=0, bd=1, width=12, sliderlength=22,
-                                sliderrelief="flat", activebackground=pal["button_active"])
+                                sliderrelief="flat", activebackground=pal["accent"])
         self.s_alpha.set(self.alpha)
         self.s_alpha.pack(side="left", fill="x", expand=True)
 
@@ -1023,6 +1026,59 @@ class HudApp:
         self._catalog_cache = None
         self._catalog_split_cache = None
         return dest
+
+    def rename_song(self, path, new_name=None, parent=None):
+        path = os.fspath(path)
+        source = path if os.path.isabs(path) else os.path.join(APP_DIR, path)
+        source = os.path.abspath(source)
+        stem, ext = os.path.splitext(os.path.basename(source))
+        if new_name is None:
+            new_name = simpledialog.askstring("Переименовать песню", "Новое имя:",
+                                              initialvalue=stem, parent=parent or self.panel)
+            if new_name is None:
+                return False
+        def report(message, error=False):
+            self.status(message, err=error)
+            if parent is not None and hasattr(parent, "import_status"):
+                parent.import_status.config(text=message, fg=self.palette["error" if error else "muted"])
+        name = new_name.strip()
+        if (not name or not name.strip(". ") or name.endswith(".") or
+                re.search(r'[\\/:*?"<>|\x00-\x1f]', name) or
+                re.fullmatch(r'(?i:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?', name)):
+            report("Недопустимое имя файла", True)
+            return False
+        dest = os.path.join(os.path.dirname(source), name + ext)
+        try:
+            with self._catalog_lock:
+                if any(entry.casefold() == os.path.basename(dest).casefold()
+                       for entry in os.listdir(os.path.dirname(source))):
+                    report("Файл с таким именем уже существует", True)
+                    return False
+                os.rename(source, dest)
+                self._catalog_cache = None
+                self._catalog_split_cache = None
+        except OSError as e:
+            report("Ошибка переименования: %s" % e, True)
+            return False
+        old_key, new_key = song_path_key(source), song_path_key(dest)
+        if old_key in self.favorites:
+            self.favorites.remove(old_key)
+            self.favorites.add(new_key)
+        if self.song_path == old_key:
+            self.song_path = new_key
+            if self.song:
+                self.song["name"] = name
+                self.lb_song.config(text=name)
+                self._redraw()
+        self.sync_favorite_button()
+        self.save_cfg()
+        for refresh in list(self._catalog_refreshers):
+            try:
+                refresh()
+            except tk.TclError:
+                self._catalog_refreshers.remove(refresh)
+        report("Переименовано: " + os.path.basename(dest))
+        return True
 
     def toggle_favorite(self, path):
         key = path.replace("\\", "/") if not os.path.isabs(path) else song_path_key(path)
@@ -1443,15 +1499,12 @@ class HudApp:
         win.import_button = self._btn(title_row, "Загрузить свою песню", lambda: upload(),
                                       font=("Segoe UI", 10), padx=12, pady=7)
         win.import_button.pack(side="right")
-        tk.Label(head, text="★ — избранное на первой странице · двойной щелчок — открыть · Ctrl+V или правый клик — вставить",
-                 fg=pal["muted"], bg=pal["bg"], font=("Segoe UI", 9), justify="left",
-                 wraplength=560).pack(anchor="w", pady=(8, 8))
         q = tk.StringVar()
         ent = tk.Entry(head, textvariable=q, bg=pal["entry"], fg=pal["text"],
                        insertbackground=pal["text"], relief="flat", font=("Segoe UI", 11),
                        highlightthickness=1, highlightbackground=pal["border"],
                        highlightcolor=pal["accent"])
-        ent.pack(fill="x", ipady=8)
+        ent.pack(fill="x", ipady=8, pady=(8, 0))
         win.catalog_count = tk.Label(head, text="", bg=pal["bg"], fg=pal["muted"],
                                      anchor="w", font=("Segoe UI", 9))
         win.catalog_count.pack(fill="x", pady=(4, 0))
@@ -1562,7 +1615,22 @@ class HudApp:
         ent.bind("<Button-3>", show_menu)
         ent.bind("<Control-v>", lambda e: (paste_search(), "break")[1])
         ent.bind("<Control-V>", lambda e: (paste_search(), "break")[1])
-        tree.bind("<Button-3>", show_menu)
+        song_menu = tk.Menu(win, tearoff=0, bg=pal["panel"], fg=pal["text"], bd=0,
+                            activebackground=pal["select"], activeforeground=pal["text"])
+        win.catalog_song_menu = song_menu
+        def rename_selected():
+            selected = tree.selection()
+            if selected:
+                self.rename_song(win.catalog_arr[int(selected[0])][1], parent=win)
+        song_menu.add_command(label="Переименовать…", command=rename_selected)
+        def show_song_menu(event):
+            iid = tree.identify_row(event.y)
+            if iid:
+                tree.selection_set(iid)
+                tree.focus(iid)
+                song_menu.tk_popup(event.x_root, event.y_root)
+            return "break"
+        tree.bind("<Button-3>", show_song_menu)
 
         def upload():
             path = filedialog.askopenfilename(
@@ -2065,6 +2133,15 @@ class HudApp:
         "ink": "#101722", "hit": "#fff0be", "wrong": "#ff9999",
     }
 
+    def hud_colors(self):
+        if self.theme == "light":
+            return {"transparent": "#0b1230", "panel": "#f5f7fa", "edge": "#b7c4d0",
+                    "key": "#ffffff", "key_edge": "#b8c6d2", "text": "#1c2430",
+                    "muted": "#394b5b", "footer_text": "#ffffff", "footer_muted": "#d3deeb",
+                    "now": "#f4cb75", "next": "#94d5d0",
+                    "ink": "#182733", "hit": "#c9e4c8", "wrong": "#efc1bd"}
+        return self.HUD_COLORS
+
     def map_palette(self):
         """Colours for the song map; highlight gold/cyan stays readable in both themes."""
         if self.theme == "light":
@@ -2108,7 +2185,7 @@ class HudApp:
         return "#%02x%02x%02x" % tuple(int(x) for x in rgb)
 
     def _build_items(self):
-        c, L, C = self.cv, self._layout_geom(), self.HUD_COLORS
+        c, L, C = self.cv, self._layout_geom(), self.hud_colors()
         c.config(width=L["w"], height=L["h"], bg=C["transparent"])
         self.root.geometry("%dx%d" % (L["w"], L["h"]))
         c.delete("all")
@@ -2136,12 +2213,12 @@ class HudApp:
         it["bar_fill"] = c.create_line(bx1, bar_y, bx1, bar_y, fill=C["now"], width=max(2, int(2*s)))
         it["name"] = c.create_text(bx1, bar_y-int(7*s), anchor="sw",
                                    text=self.song["name"][:50] if self.song else "",
-                                   font=("Segoe UI", max(8, int(10*s))), fill=C["text"])
+                                   font=("Segoe UI", max(8, int(10*s))), fill=C.get("footer_text", C["text"]))
         it["time"] = c.create_text(bx2, bar_y-int(7*s), anchor="se", text="",
-                                   font=("Segoe UI", max(8, int(10*s))), fill=C["muted"])
+                                   font=("Segoe UI", max(8, int(10*s))), fill=C.get("footer_muted", C["muted"]))
         it["credit"] = c.create_text(bx2, L["h"] - max(2, int(2*s)), anchor="se",
                                       text="@mafsolin", font=("Segoe UI", max(6, int(7*s))),
-                                      fill=C["muted"])
+                                      fill=C.get("footer_muted", C["muted"]))
         self._it = it
         self._last_style: list[tuple[str, str, str, int] | None] = [None] * 45
         self._last_frac, self._last_time = None, None
@@ -2159,7 +2236,7 @@ class HudApp:
     def _animate_items(self):
         if self._it is None:
             return
-        it, c, C, L = self._it, self.cv, self.HUD_COLORS, self._layout_geom()
+        it, c, C, L = self._it, self.cv, self.hud_colors(), self._layout_geom()
         r = self.run
         tl = r["tl"] if r else self.preview_tl
         now = self.song_time_ms() if r else 0.0
