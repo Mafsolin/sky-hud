@@ -39,7 +39,7 @@ import sky_updater
 from sky_song_map import SongMapGrid
 
 APP_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
-APP_VERSION = "1.1.10"
+APP_VERSION = "1.1.11"
 UPDATE_REPO = "Mafsolin/sky-hud"
 
 
