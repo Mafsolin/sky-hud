@@ -127,7 +127,7 @@ class HudTests(unittest.TestCase):
         finally:
             win.destroy()
 
-    def test_catalog_shows_300_and_search_finds_songs_beyond_the_first_page(self):
+    def test_catalog_pages_show_300_and_search_finds_songs_beyond_the_first_page(self):
         folder = Path(hud.APP_DIR) / "songs" / "Songs" / "Bulk"
         folder.mkdir(parents=True, exist_ok=True)
         note = '{"songNotes":[{"time":0,"key":"1Key0"}]}'
@@ -138,13 +138,59 @@ class HudTests(unittest.TestCase):
         try:
             self.root.update()
             tree = win.catalog_tree
+            self.assertEqual(win.catalog_mode, "favorites")
+            self.assertEqual(len(tree.get_children()), 0)
+            self.assertIn("Избранное", win.catalog_count.cget("text"))
+            win.catalog_next.invoke()
+            self.root.update()
             self.assertEqual(len(tree.get_children()), 300)
-            self.assertIn("300", win.catalog_count.cget("text"))
+            self.assertIn("стр. 2 из 3", win.catalog_count.cget("text"))
+            win.catalog_next.invoke()
+            self.root.update()
+            expected_last = len([e for e in self.app.catalog_entries("")
+                                 if hud.song_path_key(e[1]) not in self.app.favorites]) - 300
+            self.assertEqual(len(tree.get_children()), expected_last)
+            self.assertIn("стр. 3 из 3", win.catalog_count.cget("text"))
+            self.assertEqual(win.catalog_next.cget("state"), "disabled")
+            win.catalog_prev.invoke()
+            self.root.update()
+            self.assertEqual(len(tree.get_children()), 300)
             win.catalog_query.set("zz bulk 339")
             self.root.update()
             rows = tree.get_children()
             self.assertEqual(len(rows), 1)
             self.assertIn("zz bulk 339", tree.item(rows[0], "values")[1])
+            self.assertIn("Найдено: 1", win.catalog_count.cget("text"))
+            self.assertEqual(win.catalog_mode, "search")
+        finally:
+            win.destroy()
+
+    def test_favorites_page_comes_first_and_is_excluded_from_song_pages(self):
+        entries = self.app.catalog_entries("")
+        self.assertGreaterEqual(len(entries), 2)
+        target = entries[0][1]
+        stem = os.path.splitext(os.path.basename(target))[0]
+        self.app.toggle_favorite(target)
+        win = self.app.open_catalog()
+        try:
+            self.root.update()
+            self.assertEqual(win.catalog_mode, "favorites")
+            self.assertEqual([e[1] for e in win.catalog_arr], [target])
+            self.assertIn("Избранное: 1", win.catalog_count.cget("text"))
+            self.assertEqual(win.catalog_fav.cget("state"), "disabled")
+            win.catalog_next.invoke()
+            self.root.update()
+            self.assertEqual(win.catalog_mode, "songs")
+            names = [win.catalog_tree.item(i, "values")[1] for i in win.catalog_tree.get_children()]
+            self.assertNotIn(stem, names)
+            self.assertEqual(win.catalog_fav.cget("state"), "normal")
+            win.catalog_fav.invoke()
+            self.root.update()
+            self.assertEqual(win.catalog_mode, "favorites")
+            win.catalog_query.set("zzz")
+            self.root.update()
+            self.assertEqual(win.catalog_mode, "search")
+            self.assertEqual(win.catalog_fav.cget("state"), "disabled")
         finally:
             win.destroy()
 
@@ -351,21 +397,30 @@ class HudTests(unittest.TestCase):
         win = self.app.open_catalog()
         win.geometry("620x700+10000+10000")
         tree = win.catalog_tree
-        row = next(i for i, entry in enumerate(win.catalog_arr) if entry[1] == target)
-        iid = tree.get_children()[row]
-        self.root.update()
-        tree.see(iid)
-        self.root.update()
-        x, y, width, height = tree.bbox(iid, "favorite")
-        tree.event_generate("<Button-1>", x=x+width//2, y=y+height//2)
-        self.assertEqual(win.catalog_arr[0][1], target)
-        self.assertEqual(tree.item(tree.get_children()[0], "values")[0], "★")
-        self.app.save_cfg()
-        self.assertIn(hud.song_path_key(target), self.app.load_cfg()["favorites"])
-        self.assertEqual(self.app.catalog_entries(os.path.basename(target)[:12])[0][1], target)
-        tree.event_generate("<Button-1>", x=20, y=tree.bbox(tree.get_children()[0])[1]+8)
-        self.assertNotIn(hud.song_path_key(target), self.app.favorites)
-        win.destroy()
+        try:
+            self.root.update()
+            win.catalog_next.invoke()
+            self.root.update()
+            row = next(i for i, entry in enumerate(win.catalog_arr) if entry[1] == target)
+            iid = tree.get_children()[row]
+            self.root.update()
+            tree.see(iid)
+            self.root.update()
+            x, y, width, height = tree.bbox(iid, "favorite")
+            tree.event_generate("<Button-1>", x=x+width//2, y=y+height//2)
+            self.root.update()
+            win.catalog_fav.invoke()
+            self.root.update()
+            self.assertEqual(win.catalog_arr[0][1], target)
+            self.assertEqual(tree.item(tree.get_children()[0], "values")[0], "★")
+            self.app.save_cfg()
+            self.assertIn(hud.song_path_key(target), self.app.load_cfg()["favorites"])
+            self.assertEqual(self.app.catalog_entries(os.path.basename(target)[:12])[0][1], target)
+            tree.event_generate("<Button-1>", x=20, y=tree.bbox(tree.get_children()[0])[1]+8)
+            self.root.update()
+            self.assertNotIn(hud.song_path_key(target), self.app.favorites)
+        finally:
+            win.destroy()
 
     def test_last_song_restores_without_autostart_and_start_resets_position(self):
         import json
@@ -489,22 +544,31 @@ class HudTests(unittest.TestCase):
 
     def test_catalog_and_main_favorite_button_share_one_state(self):
         target = self.app.catalog_entries("")[0][1]
+        stem = os.path.splitext(os.path.basename(target))[0]
         self.app.load_song_file(target)
         win = self.app.open_catalog()
         try:
+            self.root.update()
+            win.catalog_next.invoke()
             self.root.update()
             row = next(i for i, entry in enumerate(win.catalog_arr) if entry[1] == target)
             iid = win.catalog_tree.get_children()[row]
             x, y, width, height = win.catalog_tree.bbox(iid, "favorite")
             win.catalog_tree.event_generate("<Button-1>", x=x + width // 2, y=y + height // 2)
+            self.root.update()
             self.assertIn(hud.song_path_key(target), self.app.favorites)
             self.assertEqual(self.app.favorite_button.cget("text"), "★")
-            values = win.catalog_tree.item(win.catalog_tree.get_children()[row], "values")
+            win.catalog_fav.invoke()
+            self.root.update()
+            values = win.catalog_tree.item(win.catalog_tree.get_children()[0], "values")
             self.assertEqual(values[0], "★")
             self.app.favorite_button.invoke()
+            self.root.update()
             self.assertNotIn(hud.song_path_key(target), self.app.favorites)
+            win.catalog_next.invoke()
+            self.root.update()
             values = next(win.catalog_tree.item(item, "values") for item in win.catalog_tree.get_children()
-                          if win.catalog_tree.item(item, "values")[1] == os.path.splitext(os.path.basename(target))[0])
+                          if win.catalog_tree.item(item, "values")[1] == stem)
             self.assertEqual(values[0], "☆")
         finally:
             win.destroy()

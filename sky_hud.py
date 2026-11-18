@@ -40,7 +40,7 @@ import sky_updater
 from sky_song_map import SongMapGrid
 
 APP_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
-APP_VERSION = "1.1.7"
+APP_VERSION = "1.1.8"
 UPDATE_REPO = "Mafsolin/sky-hud"
 
 
@@ -638,6 +638,7 @@ class HudApp:
                     activebackground=pal["button_active"], activeforeground=pal["text"],
                     relief="flat", bd=0, padx=10, pady=4, highlightthickness=1,
                     highlightbackground=pal["border"], highlightcolor=pal["border"],
+                    disabledforeground=pal["muted"],
                     font=("Segoe UI", 9))
         opts.update(kw)
         return tk.Button(parent, **opts)
@@ -798,6 +799,25 @@ class HudApp:
         if limit is not None:
             matched = matched[:limit]
         return [(name, path, size) for name, path, size, _lower in matched]
+
+    def catalog_page(self, query="", page=0, per_page=None, entries=None):
+        """Page 0 is the favourites page; later pages hold 300 songs each."""
+        per_page = per_page or self.CATALOG_LIMIT
+        if entries is None:
+            entries = self.catalog_entries(query)
+        if not query.strip():
+            favorites = [e for e in entries if song_path_key(e[1]) in self.favorites]
+            others = [e for e in entries if song_path_key(e[1]) not in self.favorites]
+            pages = max(1, (len(others) + per_page - 1) // per_page)
+            page = max(0, min(int(page), pages))
+            if page == 0:
+                return favorites, 0, pages + 1, "favorites", len(others), len(favorites)
+            start = (page - 1) * per_page
+            return others[start:start + per_page], page, pages + 1, "songs", len(others), len(favorites)
+        pages = max(1, (len(entries) + per_page - 1) // per_page)
+        page = max(0, min(int(page), pages - 1))
+        return (entries[page * per_page:(page + 1) * per_page], page, pages,
+                "search", len(entries), 0)
 
     def import_song_file(self, path):
         """Validate before copying; never overwrite a different song with the same name."""
@@ -1222,8 +1242,9 @@ class HudApp:
         win.import_button = self._btn(title_row, "Загрузить свою песню", lambda: upload(),
                                       font=("Segoe UI", 10), padx=12, pady=7)
         win.import_button.pack(side="right")
-        tk.Label(head, text="★ — избранное сверху · двойной щелчок — открыть · Ctrl+V или правый клик — вставить",
-                 fg=pal["muted"], bg=pal["bg"], font=("Segoe UI", 9)).pack(anchor="w", pady=(5, 12))
+        tk.Label(head, text="★ — избранное на первой странице · двойной щелчок — открыть · Ctrl+V или правый клик — вставить",
+                 fg=pal["muted"], bg=pal["bg"], font=("Segoe UI", 9), justify="left",
+                 wraplength=560).pack(anchor="w", pady=(5, 12))
         q = tk.StringVar()
         ent = tk.Entry(head, textvariable=q, bg=pal["entry"], fg=pal["text"],
                        insertbackground=pal["text"], relief="flat", font=("Segoe UI", 11),
@@ -1237,6 +1258,17 @@ class HudApp:
                                      anchor="w", wraplength=560, font=("Segoe UI", 9))
         win.import_status.pack(fill="x", pady=(2, 0))
         body = tk.Frame(win, bg=pal["bg"], padx=18, pady=14)
+        pager = tk.Frame(win, bg=pal["bg"], padx=18)
+        pager.pack(fill="x", side="bottom", pady=(0, 12))
+        win.catalog_fav = self._btn(pager, "★ Избранное", lambda: goto_page(0), width=12)
+        win.catalog_fav.pack(side="left")
+        win.catalog_prev = self._btn(pager, "← Назад", lambda: step_page(-1), width=9)
+        win.catalog_prev.pack(side="left", padx=(12, 0))
+        win.catalog_next = self._btn(pager, "Вперёд →", lambda: step_page(1), width=9)
+        win.catalog_next.pack(side="left", padx=(6, 0))
+        win.catalog_page_label = tk.Label(pager, text="", bg=pal["bg"], fg=pal["muted"],
+                                          font=("Segoe UI", 9))
+        win.catalog_page_label.pack(side="right")
         body.pack(fill="both", expand=True)
         style = ttk.Style(win)
         style.configure("Sky.Treeview", background=pal["bg"], fieldbackground=pal["bg"],
@@ -1256,23 +1288,46 @@ class HudApp:
         win.catalog_query = q
         win.catalog_all = []
         win.catalog_arr = []
+        win.catalog_page = 0
+        win.catalog_mode = "favorites"
 
-        def refresh():
-            matches = self.catalog_entries(q.get())
-            win.catalog_all = matches
-            win.catalog_arr = matches[:self.CATALOG_LIMIT]
+        def step_page(delta):
+            win.catalog_page = max(0, win.catalog_page + delta)
+            refresh()
+
+        def goto_page(number):
+            win.catalog_page = max(0, number)
+            refresh()
+
+        def refresh(reset=False):
+            if reset:
+                win.catalog_page = 0
+            query = q.get()
+            entries = self.catalog_entries(query)
+            win.catalog_all = entries
+            rows, page, pages, mode, total, fav_count = self.catalog_page(
+                query, win.catalog_page, entries=entries)
+            win.catalog_page = page
+            win.catalog_mode = mode
+            win.catalog_arr = rows
             children = tree.get_children()
             if children:
                 tree.delete(*children)
-            for i, (name, path, size) in enumerate(win.catalog_arr):
+            for i, (name, path, size) in enumerate(rows):
                 star = "★" if song_path_key(path) in self.favorites else "☆"
                 tree.insert("", "end", iid=str(i), values=(star, os.path.splitext(name)[0], "%d KB" % round(size/1024)))
-            total = len(matches)
-            shown = len(win.catalog_arr)
-            if total > shown:
-                win.catalog_count.config(text="Показано %s из %s · печатайте, чтобы найти нужную" % (shown, format(total, ",").replace(",", " ")))
+            number = page + 1
+            if mode == "favorites":
+                win.catalog_count.config(text=("★ Избранное: %d" % fav_count) if fav_count
+                                         else "★ Избранное · пока пусто — нажмите ☆ у песни")
+            elif mode == "search":
+                win.catalog_count.config(text="Найдено: %d · стр. %d из %d" % (total, number, pages))
             else:
-                win.catalog_count.config(text="Найдено: %d" % total)
+                win.catalog_count.config(text="Всего: %d · стр. %d из %d" % (total, number, pages))
+            win.catalog_page_label.config(text="Стр. %d из %d" % (number, pages))
+            win.catalog_prev.config(state="normal" if page > 0 else "disabled")
+            win.catalog_next.config(state="normal" if page < pages - 1 else "disabled")
+            win.catalog_fav.config(state="normal" if mode == "songs" else "disabled")
 
         def paste_search():
             try:
@@ -1360,7 +1415,9 @@ class HudApp:
 
         self._catalog_refreshers.append(refresh)
         win.protocol("WM_DELETE_WINDOW", close_catalog)
-        q.trace_add("write", lambda *_: refresh())
+        q.trace_add("write", lambda *_: refresh(reset=True))
+        win.bind("<Prior>", lambda e: step_page(-1))
+        win.bind("<Next>", lambda e: step_page(1))
         tree.bind("<Button-1>", favorite)
         tree.bind("<Double-Button-1>", choose)
         tree.bind("<Return>", choose)
