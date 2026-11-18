@@ -690,8 +690,8 @@ class HudTests(unittest.TestCase):
         self.app.set_song(song)
         self.app._build_items()
         self.app._animate_items()
-        self.assertEqual(self.app.cv.itemcget(self.app._it["body"][0][0], "fill"), self.app.HUD_COLORS["now"])
-        self.assertEqual(self.app.cv.itemcget(self.app._it["body"][0][1], "fill"), self.app.HUD_COLORS["key"])
+        self.assertEqual(self.app.cv.itemcget(self.app._it["body"][0][0], "fill"), self.app.hud_colors()["now"])
+        self.assertEqual(self.app.cv.itemcget(self.app._it["body"][0][1], "fill"), self.app.hud_colors()["key"])
 
     def test_song_map_lists_all_fragments_and_navigation_is_manual(self):
         song = hud.parse_song('{"name":"Карта","songNotes":['
@@ -905,7 +905,7 @@ class HudTests(unittest.TestCase):
             rgb = [int(color[i:i+2], 16)/255 for i in (1, 3, 5)]
             rgb = [v/12.92 if v <= .04045 else ((v+.055)/1.055)**2.4 for v in rgb]
             return sum(v*w for v, w in zip(rgb, (.2126, .7152, .0722)))
-        C = self.app.HUD_COLORS
+        C = self.app.hud_colors()
         for background, foreground in ((C["key"], C["text"]), (C["now"], C["ink"]), (C["next"], C["ink"])):
             lo, hi = sorted((luminance(background), luminance(foreground)))
             self.assertGreaterEqual((hi+.05)/(lo+.05), 7.0)
@@ -918,7 +918,7 @@ class HudTests(unittest.TestCase):
         self.app.set_song(song)
         self.app._build_items()
         self.app._animate_items()
-        C = self.app.HUD_COLORS
+        C = self.app.hud_colors()
         def option(panel, key, name):
             return self.app.cv.itemcget(self.app._it["body"][panel][key], name)
         self.assertEqual(option(0, 1, "outline"), C["next"])
