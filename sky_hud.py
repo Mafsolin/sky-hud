@@ -1048,10 +1048,15 @@ class HudApp:
             report("Недопустимое имя файла", True)
             return False
         dest = os.path.join(os.path.dirname(source), name + ext)
+        if dest == source:
+            report("Имя не изменилось")
+            return True
         try:
             with self._catalog_lock:
-                if any(entry.casefold() == os.path.basename(dest).casefold()
-                       for entry in os.listdir(os.path.dirname(source))):
+                folder = os.path.dirname(source)
+                entries = [entry for entry in os.listdir(folder)
+                           if os.path.normcase(os.path.join(folder, entry)) != os.path.normcase(source)]
+                if any(entry.casefold() == os.path.basename(dest).casefold() for entry in entries):
                     report("Файл с таким именем уже существует", True)
                     return False
                 os.rename(source, dest)

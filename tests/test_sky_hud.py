@@ -99,6 +99,8 @@ class HudTests(unittest.TestCase):
             for invalid in ("", " ... ", "bad/name", "bad:name", "BETA"):
                 self.assertFalse(self.app.rename_song(str(source), invalid))
                 self.assertTrue(source.exists())
+            self.assertTrue(self.app.rename_song(str(source), "alpha"))
+            self.assertTrue(source.exists())
             self.assertTrue(self.app.rename_song(str(source), "Renamed"))
             dest = source.with_name("Renamed.txt")
             new = hud.song_path_key(str(dest))
