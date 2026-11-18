@@ -71,7 +71,13 @@ class HudTests(unittest.TestCase):
         mapwin = self.app.open_map()
         settings = self.app.open_settings()
         self.root.update()
-        settings.theme_menu["menu"].invoke(2)
+        settings.theme_menu.current(2)
+        settings.theme_menu.event_generate("<<ComboboxSelected>>")
+        self.assertEqual(str(settings.theme_menu.cget("state")), "readonly")
+        self.assertEqual(tuple(settings.theme_menu.cget("values")), ("Системная", "Светлая", "Тёмная"))
+        settings.theme_menu.tk.call(settings.theme_menu.cget("postcommand"))
+        popdown = settings.tk.call("ttk::combobox::PopdownWindow", settings.theme_menu)
+        self.assertEqual(settings.tk.call(popdown + ".f.l", "cget", "-background"), hud.THEMES["dark"]["panel"])
         self.root.update()
         self.assertEqual(self.app.theme, "dark")
         self.assertEqual(settings.theme_var.get(), "Тёмная")
@@ -90,9 +96,16 @@ class HudTests(unittest.TestCase):
         buttons = self.app._panel_buttons
         before = self.app.panel.winfo_width(), self.app.panel.winfo_rootx()
         heights = [b.winfo_height() for b in buttons]
-        gaps = [b.winfo_x() - (a.winfo_x() + a.winfo_width()) for a,b in zip(buttons, buttons[1:])]
+        self.assertGreaterEqual(min(heights), 30)
         self.assertLessEqual(max(heights) - min(heights), 2)
-        self.assertLessEqual(max(gaps) - min(gaps), 2)
+        rows = ([buttons[0], buttons[1], buttons[4]], [buttons[2], buttons[3]])
+        for row in rows:
+            widths = [b.winfo_width() for b in row]
+            self.assertLessEqual(max(widths) - min(widths), 2)
+            gaps = [b.winfo_rootx() - (a.winfo_rootx() + a.winfo_width()) for a, b in zip(row, row[1:])]
+            self.assertTrue(all(8 <= gap <= 10 for gap in gaps), gaps)
+        vertical_gap = rows[1][0].winfo_rooty() - (rows[0][0].winfo_rooty() + rows[0][0].winfo_height())
+        self.assertTrue(8 <= vertical_gap <= 10, vertical_gap)
         self.assertTrue(all(b.winfo_rootx() + b.winfo_width() <= before[1] + before[0] for b in buttons))
         self.app.lb_hide.invoke()
         self.root.update()
@@ -101,6 +114,19 @@ class HudTests(unittest.TestCase):
         self.app.lb_hide.invoke()
         self.root.update()
         self.assertLessEqual(abs(self.app.panel.winfo_width() - before[0]), 2)
+
+    def test_theme_preserves_catalog_query_and_page(self):
+        with patch.object(hud.HudApp, "CATALOG_LIMIT", 1):
+            catalog = self.app.open_catalog()
+            catalog.catalog_query.set("a")
+            catalog.catalog_next.invoke()
+            self.assertEqual(catalog.catalog_page, 1)
+            self.app.set_theme("dark")
+            self.root.update()
+            replacement = next(w for w in self.app.panel.winfo_children()
+                               if isinstance(w, tk.Toplevel) and "каталог" in w.title())
+            self.assertEqual(replacement.catalog_query.get(), "a")
+            self.assertEqual(replacement.catalog_page, 1)
 
     def test_catalog_few_favorites_and_scrollbars_follow_both_palettes(self):
         from tkinter import ttk

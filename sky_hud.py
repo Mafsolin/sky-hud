@@ -710,6 +710,12 @@ class HudApp:
                         lightcolor=pal["button"], darkcolor=pal["button"], gripcount=0)
         style.map("Sky.Vertical.TScrollbar", background=[("active", pal["button_active"])],
                   arrowcolor=[("disabled", pal["muted"])])
+        style.configure("Sky.TCombobox", fieldbackground=pal["entry"], background=pal["button"],
+                        foreground=pal["text"], arrowcolor=pal["text"], bordercolor=pal["border"],
+                        lightcolor=pal["border"], darkcolor=pal["border"], padding=5)
+        style.map("Sky.TCombobox", fieldbackground=[("readonly", pal["entry"])],
+                  foreground=[("readonly", pal["text"])],
+                  background=[("active", pal["button_active"])])
 
     def set_theme(self, choice):
         if choice not in ("system", "light", "dark"):
@@ -720,6 +726,10 @@ class HudApp:
         self.palette = THEMES[self.theme]
         pal = self.palette
         self._configure_ttk_theme()
+        self.panel.option_add("*TCombobox*Listbox.background", pal["panel"])
+        self.panel.option_add("*TCombobox*Listbox.foreground", pal["text"])
+        self.panel.option_add("*TCombobox*Listbox.selectBackground", pal["select"])
+        self.panel.option_add("*TCombobox*Listbox.selectForeground", pal["text"])
         # Recolor all classic widgets, including open dialogs and their menus.
         # Match palette roles by existing value, with explicit widget-specific roles.
         def recolor(widget):
@@ -761,17 +771,21 @@ class HudApp:
                    ("карта песни" in w.title() or "каталог" in w.title())]
         for win, title in windows:
             geometry = win.geometry()
+            catalog_state = (win.catalog_query.get(), win.catalog_page) if hasattr(win, "catalog_query") else None
             win.destroy()
             replacement = self.open_map() if "карта песни" in title else (self.open_catalog() if "каталог" in title else None)
             if replacement:
                 replacement.geometry(geometry)
+                if catalog_state is not None:
+                    replacement.catalog_query.set(catalog_state[0])
+                    replacement.catalog_goto_page(catalog_state[1])
         self.save_cfg()
 
     def _btn(self, parent, text, command, **kw):
         pal = self.palette
         opts = dict(text=text, command=command, bg=pal["button"], fg=pal["text"],
                     activebackground=pal["button_active"], activeforeground=pal["text"],
-                    relief="flat", bd=0, padx=10, pady=4, highlightthickness=1,
+                    relief="flat", bd=0, padx=10, pady=4, highlightthickness=0,
                     highlightbackground=pal["border"], highlightcolor=pal["border"],
                     disabledforeground=pal["muted"],
                     font=("Segoe UI", 9))
@@ -788,24 +802,30 @@ class HudApp:
         p = self.panel
         pal = self.palette
         head = tk.Frame(p, bg=pal["bg"])
-        head.pack(fill="x", padx=8, pady=(6, 2))
+        head.pack(fill="x", padx=8, pady=(8, 0))
         tk.Label(head, text="Sky HUD", anchor="w", bg=pal["bg"], fg=pal["text"],
-                 font=("Segoe UI", 12, "bold")).pack(side="left")
+                 font=("Segoe UI", 12)).pack(side="left")
         tk.Label(head, text="v" + APP_VERSION, anchor="e", bg=pal["bg"], fg=pal["muted"],
                  font=("Segoe UI", 8)).pack(side="right")
         f = tk.Frame(p, bg=pal["bg"])
-        f.pack(fill="x", padx=6, pady=(6, 0))
+        f.pack(fill="x", padx=4, pady=(4, 4))
         self._panel_buttons = [
-            self._btn(f, "Каталог нот", self.open_catalog),
-            self._btn(f, "Открыть карту", self.open_map),
-            self._btn(f, "▶ Старт", self.toggle_run,
+            self._btn(f, "Каталог нот", self.open_catalog, width=20, pady=6),
+            self._btn(f, "Открыть карту", self.open_map, width=20, pady=6),
+            self._btn(f, "▶ Старт", self.toggle_run, width=20, pady=6,
                       bg=pal["accent"], fg=("#182733" if self.theme == "dark" else "#ffffff")),
             self._btn(f, "Показать HUD" if self.hud_hidden else "Скрыть HUD полностью",
-                      self.toggle_hud, width=23),
-            self._btn(f, "Настройки", self.open_settings),
+                      self.toggle_hud, width=20, pady=6),
+            self._btn(f, "Настройки", self.open_settings, width=20, pady=6),
         ]
-        for col, button in enumerate(self._panel_buttons):
-            button.grid(row=0, column=col, padx=3, pady=3, sticky="nsew")
+        for col in range(6):
+            f.grid_columnconfigure(col, weight=1, uniform="buttons")
+        for button, row, col, span in ((self._panel_buttons[0], 0, 0, 2),
+                                       (self._panel_buttons[1], 0, 2, 2),
+                                       (self._panel_buttons[4], 0, 4, 2),
+                                       (self._panel_buttons[2], 1, 0, 3),
+                                       (self._panel_buttons[3], 1, 3, 3)):
+            button.grid(row=row, column=col, columnspan=span, padx=4, pady=4, sticky="nsew")
         self.lb_go = self._panel_buttons[2]
         self.lb_hide = self._panel_buttons[3]
         self.mode_btns = {}
@@ -813,13 +833,14 @@ class HudApp:
         song_row = tk.Frame(p, bg=pal["bg"])
         song_row.pack(fill="x", padx=8)
         self.lb_song = tk.Label(song_row, text="—", anchor="w", bg=pal["bg"], fg=pal["text"],
-                                font=("Segoe UI", 9, "bold"))
+                                font=("Segoe UI", 9))
         self.lb_song.pack(side="left", fill="x", expand=True)
         self.favorite_button = self._btn(song_row, "☆", self.toggle_selected_favorite, width=3)
-        self.favorite_button.pack(side="right", padx=(6, 0))
+        self.favorite_button.pack(side="right", padx=(8, 0))
         self.lb_meta = tk.Label(p, text="", anchor="w", bg=pal["bg"], fg=pal["muted"],
                                 font=("Segoe UI", 8))
         self.lb_meta.pack(fill="x", padx=8)
+        tk.Frame(p, bg=pal["border"], height=1).pack(fill="x", padx=8, pady=(8, 0))
 
         self.part_vars = {}
         self.part_frame = tk.Frame(p, bg=pal["bg"])
@@ -852,26 +873,26 @@ class HudApp:
         cb.pack(side="left")
 
         f3 = tk.Frame(p, bg=pal["bg"])
-        f3.pack(fill="x", padx=6)
+        f3.pack(fill="x", padx=8, pady=(8, 0))
         tk.Label(f3, text="Масштаб", bg=pal["bg"], fg=pal["text"], font=("Segoe UI", 9)).pack(side="left")
         self.s_scale = tk.Scale(f3, from_=0.5, to=2.0, resolution=0.05, orient="horizontal",
                                 showvalue=False, command=lambda v: self._set_scale(float(v)),
-                                bg=pal["bg"], fg=pal["text"], troughcolor=pal["scale"],
+                                bg=pal["button"], fg=pal["text"], troughcolor=pal["scale"],
                                 highlightthickness=0, bd=1, width=12, sliderlength=22,
-                                sliderrelief="raised", activebackground=pal["button_active"])
+                                sliderrelief="flat", activebackground=pal["button_active"])
         self.s_scale.set(self.scale)
         self.s_scale.pack(side="left", fill="x", expand=True)
         tk.Label(f3, text="Прозрачность", bg=pal["bg"], fg=pal["text"], font=("Segoe UI", 9)).pack(side="left", padx=(8, 0))
         self.s_alpha = tk.Scale(f3, from_=0.35, to=1.0, resolution=0.05, orient="horizontal",
                                 showvalue=False, command=self._set_alpha,
-                                bg=pal["bg"], fg=pal["text"], troughcolor=pal["scale"],
+                                bg=pal["button"], fg=pal["text"], troughcolor=pal["scale"],
                                 highlightthickness=0, bd=1, width=12, sliderlength=22,
-                                sliderrelief="raised", activebackground=pal["button_active"])
+                                sliderrelief="flat", activebackground=pal["button_active"])
         self.s_alpha.set(self.alpha)
         self.s_alpha.pack(side="left", fill="x", expand=True)
 
         f4 = tk.Frame(p, bg=pal["bg"])
-        f4.pack(fill="x", padx=6, pady=(0, 2))
+        f4.pack(fill="x", padx=8, pady=(8, 8))
         for t, d in (("←", (-12, 0)), ("→", (12, 0)), ("↑", (0, -12)), ("↓", (0, 12))):
             self._btn(f4, t, lambda d=d: self.nudge(*d), width=3, padx=4).pack(side="left")
         self._btn(f4, "По центру низа", self.place_bottom).pack(side="left", padx=8)
@@ -1278,21 +1299,26 @@ class HudApp:
                     if job.get("install") and value:
                         shutil.rmtree(value[0], ignore_errors=True)
         win.bind("<Destroy>", destroyed, add="+")
-        tk.Label(win, text="Настройки Sky HUD", font=("Segoe UI", 13, "bold"),
-                 bg=pal["bg"], fg=pal["text"]).pack(anchor="w", padx=16, pady=(14, 4))
+        tk.Label(win, text="Настройки Sky HUD", font=("Segoe UI", 12),
+                 bg=pal["bg"], fg=pal["text"]).pack(anchor="w", padx=16, pady=(16, 8))
         theme_row = tk.Frame(win, bg=pal["bg"])
-        theme_row.pack(fill="x", padx=16, pady=(0, 4))
+        theme_row.pack(fill="x", padx=16, pady=(0, 8))
         tk.Label(theme_row, text="Тема", bg=pal["bg"], fg=pal["text"]).pack(side="left")
         choices = {"Системная": "system", "Светлая": "light", "Тёмная": "dark"}
         labels = {value: key for key, value in choices.items()}
         win.theme_var = tk.StringVar(value=labels[self.theme_choice])
-        win.theme_menu = tk.OptionMenu(theme_row, win.theme_var, *choices,
-                                       command=lambda value: self.set_theme(choices[value]))
-        win.theme_menu.config(bg=pal["button"], fg=pal["text"], activebackground=pal["button_active"],
-                              activeforeground=pal["text"], relief="flat", highlightthickness=0, bd=0)
-        win.theme_menu["menu"].config(bg=pal["panel"], fg=pal["text"],
-                                      activebackground=pal["select"], activeforeground=pal["text"])
+        win.theme_menu = ttk.Combobox(theme_row, textvariable=win.theme_var,
+                                      values=list(choices), state="readonly", style="Sky.TCombobox", width=15)
+        win.theme_menu.bind("<<ComboboxSelected>>",
+                            lambda event: self.set_theme(choices[win.theme_var.get()]))
+        def style_theme_list(event):
+            popdown = win.tk.call("ttk::combobox::PopdownWindow", win.theme_menu)
+            win.tk.call(popdown + ".f.l", "configure", "-background", self.palette["panel"],
+                        "-foreground", self.palette["text"], "-selectbackground", self.palette["select"],
+                        "-selectforeground", self.palette["text"])
+        win.theme_menu.configure(postcommand=lambda: style_theme_list(None))
         win.theme_menu.pack(side="left", padx=8)
+        tk.Frame(win, bg=pal["border"], height=1).pack(fill="x", padx=16, pady=(0, 8))
         win.creator_label = tk.Label(win, text="Создатель: @mafsolin", fg=pal["muted"], bg=pal["bg"],
                                      font=("Segoe UI", 9))
         win.creator_label.pack(anchor="w", padx=16)
@@ -1409,18 +1435,18 @@ class HudApp:
         win.configure(bg=pal["bg"])
         self._theme_titlebar(win)
         win.attributes("-topmost", True)
-        head = tk.Frame(win, bg=pal["bg"], padx=18, pady=16)
+        head = tk.Frame(win, bg=pal["bg"], padx=16, pady=16)
         head.pack(fill="x")
         title_row = tk.Frame(head, bg=pal["bg"])
         title_row.pack(fill="x")
         tk.Label(title_row, text="Каталог нот", fg=pal["text"], bg=pal["bg"],
-                 font=("Segoe UI", 18)).pack(side="left")
+                 font=("Segoe UI", 12)).pack(side="left")
         win.import_button = self._btn(title_row, "Загрузить свою песню", lambda: upload(),
                                       font=("Segoe UI", 10), padx=12, pady=7)
         win.import_button.pack(side="right")
         tk.Label(head, text="★ — избранное на первой странице · двойной щелчок — открыть · Ctrl+V или правый клик — вставить",
                  fg=pal["muted"], bg=pal["bg"], font=("Segoe UI", 9), justify="left",
-                 wraplength=560).pack(anchor="w", pady=(5, 12))
+                 wraplength=560).pack(anchor="w", pady=(8, 8))
         q = tk.StringVar()
         ent = tk.Entry(head, textvariable=q, bg=pal["entry"], fg=pal["text"],
                        insertbackground=pal["text"], relief="flat", font=("Segoe UI", 11),
@@ -1433,15 +1459,16 @@ class HudApp:
         win.import_status = tk.Label(head, text="", bg=pal["bg"], fg=pal["muted"],
                                      anchor="w", wraplength=560, font=("Segoe UI", 9))
         win.import_status.pack(fill="x", pady=(2, 0))
-        body = tk.Frame(win, bg=pal["bg"], padx=18, pady=14)
-        pager = tk.Frame(win, bg=pal["bg"], padx=18)
+        tk.Frame(win, bg=pal["border"], height=1).pack(fill="x", padx=16)
+        body = tk.Frame(win, bg=pal["bg"], padx=16, pady=8)
+        pager = tk.Frame(win, bg=pal["bg"], padx=16)
         pager.pack(fill="x", side="bottom", pady=(0, 12))
         win.catalog_fav = self._btn(pager, "★ Избранное", lambda: goto_page(0), width=12)
         win.catalog_fav.pack(side="left")
         win.catalog_prev = self._btn(pager, "← Назад", lambda: step_page(-1), width=9)
-        win.catalog_prev.pack(side="left", padx=(12, 0))
+        win.catalog_prev.pack(side="left", padx=(8, 0))
         win.catalog_next = self._btn(pager, "Вперёд →", lambda: step_page(1), width=9)
-        win.catalog_next.pack(side="left", padx=(6, 0))
+        win.catalog_next.pack(side="left", padx=(8, 0))
         win.catalog_page_label = tk.Label(pager, text="", bg=pal["bg"], fg=pal["muted"],
                                           font=("Segoe UI", 9))
         win.catalog_page_label.pack(side="right")
@@ -1476,6 +1503,8 @@ class HudApp:
         def goto_page(number):
             win.catalog_page = max(0, number)
             refresh()
+
+        win.catalog_goto_page = goto_page
 
         def refresh(reset=False):
             if reset:
