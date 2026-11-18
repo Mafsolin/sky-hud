@@ -39,7 +39,7 @@ import sky_updater
 from sky_song_map import SongMapGrid
 
 APP_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
-APP_VERSION = "1.1.9"
+APP_VERSION = "1.1.10"
 UPDATE_REPO = "Mafsolin/sky-hud"
 
 
@@ -896,7 +896,6 @@ class HudApp:
         for t, d in (("←", (-12, 0)), ("→", (12, 0)), ("↑", (0, -12)), ("↓", (0, 12))):
             self._btn(f4, t, lambda d=d: self.nudge(*d), width=3, padx=4).pack(side="left")
         self._btn(f4, "По центру низа", self.place_bottom).pack(side="left", padx=8)
-        self._btn(f4, "✕ Закрыть", self.quit).pack(side="right")
 
         self.lb_stats = tk.Label(p, text="", fg=pal["ok"], bg=pal["bg"], font=("Segoe UI", 9))
         self.lb_status = tk.Label(p, text="Загрузите файл песни (.txt/.json) или нажмите «Пример»",
