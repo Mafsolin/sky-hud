@@ -146,6 +146,58 @@ class UpdaterTests(unittest.TestCase):
         updater.wait_for_pid(os.getpid(), timeout=0)
         self.assertIs(ctypes.windll.kernel32.OpenProcess.restype, ctypes.c_void_p)
 
+    def test_successful_install_removes_the_transaction_journal(self):
+        self.package_files()
+        for name in updater.REQUIRED_FILES:
+            (self.install / name).write_bytes(b"old-" + name.encode())
+        updater.install_package(self.package, self.install, restart=False)
+        self.assertFalse((self.install / updater.JOURNAL_NAME).exists())
+        self.assertEqual((self.install / "SkyHUD.exe").read_bytes(), b"new-hud")
+
+    def test_interrupted_transaction_is_rolled_back_from_its_journal(self):
+        backup = self.install / ".sky-hud-backups" / "crash"
+        backup.mkdir(parents=True)
+        for name in updater.REQUIRED_FILES:
+            (backup / name).write_bytes(b"old-" + name.encode())
+            (self.install / name).write_bytes(b"mixed-" + name.encode())
+        journal = self.install / updater.JOURNAL_NAME
+        journal.write_text('{"backup": "%s", "files": {"SkyHUD.exe": true, "SkyHUD-Updater.exe": true}}'
+                           % str(backup).replace("\\", "\\\\"), encoding="utf-8")
+        self.assertEqual(updater.recover_incomplete(str(self.install)), [])
+        self.assertFalse(journal.exists())
+        for name in updater.REQUIRED_FILES:
+            self.assertEqual((self.install / name).read_bytes(), b"old-" + name.encode())
+
+    def test_journal_ignores_paths_outside_the_allowlist(self):
+        journal = self.install / updater.JOURNAL_NAME
+        journal.write_text('{"backup": "%s", "files": {"../victim.txt": false}}'
+                           % str(self.install).replace("\\", "\\\\"), encoding="utf-8")
+        (self.base / "victim.txt").write_bytes(b"keep")
+        updater.recover_incomplete(str(self.install))
+        self.assertEqual((self.base / "victim.txt").read_bytes(), b"keep")
+
+    def test_failed_rollback_keeps_the_journal_for_the_next_recovery(self):
+        self.package_files()
+        for name in updater.REQUIRED_FILES:
+            (self.install / name).write_bytes(b"old-" + name.encode())
+        real_replace = updater.os.replace
+
+        def break_install_and_restore(source, target):
+            target = Path(target)
+            if target == self.install / "SkyHUD-Updater.exe":
+                raise PermissionError("injected install failure")
+            if target == self.install / "SkyHUD.exe" and str(source).endswith(".restore"):
+                raise PermissionError("injected restore failure")
+            return real_replace(source, target)
+
+        with patch.object(updater.os, "replace", side_effect=break_install_and_restore):
+            with self.assertRaises(RuntimeError) as caught:
+                updater.install_package(self.package, self.install, restart=False)
+        self.assertIn("Ошибка отката", str(caught.exception))
+        self.assertTrue((self.install / updater.JOURNAL_NAME).exists())
+        backups = list(self.install.glob(".sky-hud-backups/*/SkyHUD.exe"))
+        self.assertTrue(backups)
+
 
 if __name__ == "__main__":
     unittest.main()

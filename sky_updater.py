@@ -10,6 +10,7 @@ import argparse
 import ctypes
 from ctypes import wintypes
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -70,6 +71,7 @@ def prepare_update(package, expected_sha256, work_root=None):
     """Verify before extracting the sidecar outside the installation directory."""
     verify_digest(package, expected_sha256)
     safe_members(package)
+    _prune_work_dirs(work_root)
     work = Path(tempfile.mkdtemp(prefix="sky-hud-update-", dir=work_root))
     try:
         copied = work / "SkyHUD-Update.zip"
@@ -131,6 +133,94 @@ def replace_with_retry(source, target):
             time.sleep(0.1)
 
 
+JOURNAL_NAME = ".sky-hud-update-journal.json"
+
+
+def _journal_path(install_dir):
+    return Path(install_dir) / JOURNAL_NAME
+
+
+def _write_journal(install_dir, backup_dir, members, existed):
+    """Persist the transaction before the first replacement so a crash can be undone."""
+    journal = _journal_path(install_dir)
+    payload = {"backup": str(backup_dir),
+               "files": {name: name in existed for name in sorted(members)}}
+    temporary = journal.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    os.replace(temporary, journal)
+
+
+def recover_incomplete(install_dir):
+    """Roll back an interrupted installation; returns a list of recovery errors."""
+    install_dir = Path(install_dir)
+    journal = _journal_path(install_dir)
+    if not journal.is_file():
+        return []
+    try:
+        payload = json.loads(journal.read_text(encoding="utf-8"))
+        backup_dir = Path(payload["backup"])
+        files = payload["files"]
+    except (OSError, ValueError, KeyError, TypeError):
+        journal.unlink(missing_ok=True)
+        return []
+    if not isinstance(files, dict):
+        journal.unlink(missing_ok=True)
+        return []
+    errors = []
+    for name, existed in files.items():
+        if name not in ALLOWED_FILES or os.path.basename(name) != name:
+            continue
+        target = install_dir / name
+        try:
+            if existed:
+                source = backup_dir / name
+                if source.is_file():
+                    temporary = install_dir / (name + ".recover")
+                    shutil.copy2(source, temporary)
+                    replace_with_retry(temporary, target)
+            else:
+                target.unlink(missing_ok=True)
+        except OSError as exc:
+            errors.append("%s: %s" % (name, exc))
+    if not errors:
+        journal.unlink(missing_ok=True)
+    return errors
+
+
+def _prune_work_dirs(work_root):
+    """Remove update staging folders left by earlier runs (never the current one)."""
+    root = Path(work_root) if work_root else Path(tempfile.gettempdir())
+    cutoff = time.time() - 2 * 24 * 3600
+    try:
+        candidates = list(root.glob("sky-hud-update-*"))
+    except OSError:
+        return
+    for path in candidates:
+        try:
+            if path.is_dir() and path.stat().st_mtime < cutoff:
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            continue
+
+
+def _prune_backups(backup_root, keep=10, days=30):
+    """Keep recent recovery copies, drop old ones only after a successful install."""
+    try:
+        backups = sorted((path for path in backup_root.iterdir() if path.is_dir()),
+                         key=lambda path: path.name, reverse=True)
+    except OSError:
+        return
+    cutoff = time.time() - days * 24 * 3600
+    for index, path in enumerate(backups):
+        if index < keep:
+            continue
+        try:
+            if path.stat().st_mtime < cutoff:
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            continue
+
+
 def install_package(package: str | os.PathLike[str], install_dir: str | os.PathLike[str],
                     restart: bool = True, expected_sha256=None) -> None:
     package = Path(package).resolve()
@@ -139,6 +229,9 @@ def install_package(package: str | os.PathLike[str], install_dir: str | os.PathL
         verify_digest(package, expected_sha256)
     members = safe_members(package)
     install_dir.mkdir(parents=True, exist_ok=True)
+    recovery_errors = recover_incomplete(install_dir)
+    if recovery_errors:
+        raise RuntimeError("Не удалось восстановить прошлое обновление: %s" % "; ".join(recovery_errors))
     stage = Path(tempfile.mkdtemp(prefix=".sky-hud-stage-", dir=install_dir))
     backup_dir = None
     replaced = []
@@ -158,6 +251,7 @@ def install_package(package: str | os.PathLike[str], install_dir: str | os.PathL
         for name in members:
             if name in existed:
                 shutil.copy2(install_dir / name, backup_dir / name)
+        _write_journal(install_dir, backup_dir, members, existed)
         for name in members:
             replace_with_retry(stage / name, install_dir / name)
             replaced.append(name)
@@ -167,6 +261,8 @@ def install_package(package: str | os.PathLike[str], install_dir: str | os.PathL
             time.sleep(0.8)
             if process.poll() is not None:
                 raise RuntimeError("Новая версия завершилась сразу после запуска")
+        _journal_path(install_dir).unlink(missing_ok=True)
+        _prune_backups(backup_root)
     except Exception as exc:
         recovery_errors = []
         for name in reversed(replaced):
@@ -184,6 +280,7 @@ def install_package(package: str | os.PathLike[str], install_dir: str | os.PathL
         if recovery_errors:
             raise RuntimeError("Ошибка отката: %s. Резервная копия: %s" %
                                ("; ".join(recovery_errors), backup_dir)) from exc
+        _journal_path(install_dir).unlink(missing_ok=True)
         raise
     finally:
         shutil.rmtree(stage, ignore_errors=True)
@@ -202,6 +299,9 @@ def main() -> int:
         verify_digest(args.package, args.sha256)
         if not wait_for_pid(args.pid):
             raise RuntimeError("Старый Sky HUD не завершился вовремя")
+        recovery = recover_incomplete(args.install_dir)
+        if recovery:
+            raise RuntimeError("Не удалось восстановить прошлое обновление: %s" % "; ".join(recovery))
         install_package(args.package, args.install_dir, restart=not args.no_restart,
                         expected_sha256=args.sha256)
         return 0

@@ -35,12 +35,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import winsound
-import zipfile
 import sky_updater
 from sky_song_map import SongMapGrid
 
 APP_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
-APP_VERSION = "1.1.8"
+APP_VERSION = "1.1.9"
 UPDATE_REPO = "Mafsolin/sky-hud"
 
 
@@ -142,6 +141,7 @@ PART_COLORS = [  # r,g,b
 ]
 
 BASE_C4 = 261.6256
+MAX_SONG_MS = 12 * 60 * 60 * 1000  # 12 часов: защита от битых времён в JSON
 
 THEMES = {
     "dark": {
@@ -178,8 +178,13 @@ def parse_song(text, src_name="песня"):
     try:
         obj = json.loads(text)
     except Exception as e:
-        raise ValueError("Не JSON: %s" % e)
-    data = obj[0] if isinstance(obj, list) else obj
+        raise ValueError("Не JSON: %s" % e) from None
+    if isinstance(obj, list):
+        if not obj:
+            raise ValueError("Пустой список вместо песни Sky")
+        data = obj[0]
+    else:
+        data = obj
     if not isinstance(data, dict) or not isinstance(data.get("songNotes"), list):
         raise ValueError("Не похоже на файл песни Sky (нет songNotes)")
     if data.get("isEncrypted"):
@@ -205,7 +210,9 @@ def parse_song(text, src_name="песня"):
             note_time = float(n.get("time", 0) or 0)
         except (TypeError, ValueError):
             continue
-        if not math.isfinite(note_time):
+        if not math.isfinite(note_time) or note_time < 0 or note_time > MAX_SONG_MS:
+            continue
+        if not 0 <= num <= 15:
             continue
         max_nums.append(num)
         parts_map.setdefault(part, []).append((note_time, num))
@@ -213,7 +220,9 @@ def parse_song(text, src_name="песня"):
     if not parts_map:
         raise ValueError("В файле не нашлось нот")
 
-    one_based = max(max_nums) > 14 or (max(max_nums) == 15 and 0 not in max_nums)
+    # Битая нота с номером 99 не должна переключать всю песню в one-based
+    # и выбрасывать корректный Key0. База определяется только по валидным 0..15.
+    one_based = 0 not in max_nums and 15 in max_nums
     parts = []
     for pid in sorted(parts_map, key=lambda p: (len(p), p)):
         notes = []
@@ -238,10 +247,17 @@ def parse_song(text, src_name="песня"):
     for p in parts:
         if p["events"]:
             dur_ms = max(dur_ms, p["events"][-1][0])
+    bpm = data.get("bpm") or 0
+    try:
+        bpm = float(bpm)
+    except (TypeError, ValueError):
+        bpm = 0
+    if not math.isfinite(bpm) or bpm < 0:
+        bpm = 0
     return {
-        "name": data.get("name") or src_name,
-        "author": data.get("author") or "",
-        "bpm": data.get("bpm") or 0,
+        "name": str(data.get("name") or src_name),
+        "author": str(data.get("author") or ""),
+        "bpm": bpm,
         "parts": parts,
         "dur_ms": dur_ms,
     }
@@ -256,7 +272,7 @@ def build_timeline(song, part_ids):
                 time_set.add(t)
     times = sorted(time_set)
     evs = [{"t": t, "notes": []} for t in times]
-    by_time = {t: e for t, e in zip(times, evs)}
+    by_time = {t: e for t, e in zip(times, evs, strict=True)}
     for p in song["parts"]:
         if p["id"] in part_ids:
             for t, ks in p["events"]:
@@ -400,6 +416,8 @@ class HudApp:
         self.hud_hidden = bool(self.cfg.get("hud_hidden", False))
         self.favorites = set(self.cfg.get("favorites") or [])
         self._catalog_cache = None
+        self._catalog_split_cache = None
+        self._catalog_lock = threading.RLock()
         self._catalog_refreshers = []
         self._map_refreshers = []
         self.preview_index = 0
@@ -449,6 +467,7 @@ class HudApp:
         self._after(33, self._frame)
         self._after(40, self._tick)
         self._after(400, self._save_cfg_debounced)
+        self._after(250, lambda: threading.Thread(target=self._warm_catalog, daemon=True).start())
         self._click_through = self._make_click_through()
         self._t0 = time.perf_counter()
         if self.hud_hidden:
@@ -478,10 +497,10 @@ class HudApp:
     def _default_panel_pos(self):
         vx, vy, vw, vh = self._desktop_bounds()
         pw, ph = self.panel.winfo_reqwidth(), self.panel.winfo_reqheight()
-        rx, ry, rw, rh = self.geom()
+        rx, ry, rw, _rh = self.geom()
         if not self._on_desktop(rx, ry):
             rx, ry = self._default_hud_pos()
-            rw, rh = 0, 0
+            rw = 0
         px, py = rx + rw + 14, max(vy + 20, ry)
         if px + pw > vx + vw:
             px = max(vx + 10, rx - pw - 14)
@@ -534,9 +553,50 @@ class HudApp:
     def load_cfg(self):
         try:
             with open(self.CFG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                raw = json.load(f)
         except Exception:
             return {}
+        if not isinstance(raw, dict):
+            return {}
+        cfg = dict(raw)
+
+        def number(key, default, low, high):
+            try:
+                value = float(cfg.get(key, default))
+            except (TypeError, ValueError):
+                return default
+            if not math.isfinite(value):
+                return default
+            return max(low, min(high, value))
+
+        cfg["scale"] = number("scale", 1.0, 0.5, 2.0)
+        cfg["alpha"] = number("alpha", 0.85, 0.35, 1.0)
+        cfg["tempo"] = number("tempo", 1.0, 0.5, 2.0)
+        for key in ("x", "y", "px", "py", "w", "h"):
+            if key not in cfg:
+                continue
+            try:
+                value = float(cfg[key])
+                cfg[key] = int(value) if math.isfinite(value) else None
+            except (TypeError, ValueError):
+                cfg[key] = None
+            if cfg[key] is None:
+                cfg.pop(key)
+        if cfg.get("mode") not in ("demo", "step", "train"):
+            cfg["mode"] = "step"
+        for key in ("metro", "sound", "loop", "hud_hidden"):
+            if key in cfg:
+                cfg[key] = bool(cfg[key])
+        parts = cfg.get("parts")
+        if isinstance(parts, (list, tuple)):
+            cfg["parts"] = [str(part) for part in parts]
+        else:
+            cfg.pop("parts", None)
+        favorites = cfg.get("favorites")
+        cfg["favorites"] = [str(item) for item in favorites] if isinstance(favorites, (list, tuple)) else []
+        if not isinstance(cfg.get("last_song"), str):
+            cfg.pop("last_song", None)
+        return cfg
 
     _save_pending = False
 
@@ -601,8 +661,6 @@ class HudApp:
         }
         self.cfg = cfg
         # Атомарная запись: пишем во временный файл, потом переименовываем
-        import tempfile
-        import os
         tmp = self.CFG_FILE + ".tmp"
         try:
             with open(tmp, "w", encoding="utf-8") as f:
@@ -680,28 +738,6 @@ class HudApp:
                                 font=("Segoe UI", 8))
         self.lb_meta.pack(fill="x", padx=8)
 
-        # локальный каталог нот внутри HUD
-        cat = tk.LabelFrame(p, text="Каталог нот", padx=4, pady=4, bg=pal["bg"], fg=pal["text"],
-                            highlightthickness=0, bd=0)
-        cat.pack(fill="both", padx=6, pady=(4, 2))
-        self.catalog_query = tk.StringVar()
-        ent = tk.Entry(cat, textvariable=self.catalog_query, bg=pal["entry"], fg=pal["text"],
-                       insertbackground=pal["text"], relief="flat", highlightthickness=0,
-                       font=("Segoe UI", 9))
-        ent.pack(side="left", fill="x", expand=True)
-        ent.insert(0, "Поиск песни…")
-        ent.bind("<FocusIn>", lambda e: ent.delete(0, "end") if ent.get()== "Поиск песни…" else None)
-        self._btn(cat, "Найти", self._refresh_catalog).pack(side="left", padx=(4, 0))
-        self.catalog_list = tk.Listbox(cat, height=5, exportselection=False, bg=pal["entry"],
-                                       fg=pal["text"], selectbackground=pal["select"],
-                                       selectforeground=pal["text"], relief="flat",
-                                       highlightthickness=0, bd=0)
-        self.catalog_list.pack(fill="both", expand=True, pady=(5, 0))
-        self.catalog_list.bind("<Double-Button-1>", self._catalog_open)
-        self.catalog_paths = []
-        self._refresh_catalog()
-        cat.pack_forget()
-
         self.part_vars = {}
         self.part_frame = tk.Frame(p, bg=pal["bg"])
         self.part_frame.pack_forget()
@@ -767,57 +803,87 @@ class HudApp:
         self.sync_favorite_button()
         f2.pack_forget()
 
-    def _refresh_catalog(self):
-        q = self.catalog_query.get().strip() if hasattr(self, "catalog_query") else ""
-        if q.casefold() == "поиск песни…".casefold():
-            q = ""
-        self.catalog_paths = [path for _, path, _ in self.catalog_entries(q, limit=self.CATALOG_LIMIT)]
-        if hasattr(self, "catalog_list"):
-            self.catalog_list.delete(0, "end")
-            for path in self.catalog_paths:
-                self.catalog_list.insert("end", os.path.basename(path))
+    def _catalog_index(self):
+        """Build once: name, path, size, lower-case name and normalised favourite key."""
+        with self._catalog_lock:
+            if getattr(self, "_catalog_cache", None) is None:
+                entries = []
+                roots = [os.path.join(APP_DIR, "songs", folder) for folder in ("Songs", "Multi-Sheet Songs")]
+                roots.append(self.CUSTOM_SONG_DIR)
+                for root in roots:
+                    for base, _, files in os.walk(root):
+                        for name in files:
+                            if name.lower().endswith((".txt", ".json")):
+                                path = os.path.join(base, name)
+                                try:
+                                    entries.append((name, path, os.path.getsize(path),
+                                                    name.casefold(), song_path_key(path)))
+                                except OSError:
+                                    continue
+                entries.sort(key=lambda entry: (entry[3], entry[1]))
+                self._catalog_cache = entries
+                self._catalog_split_cache = None
+            return self._catalog_cache
+
+    def _warm_catalog(self):
+        """Scan the library off the Tk thread so the first catalog open is instant."""
+        try:
+            self._catalog_index()
+            self._catalog_split()
+        except Exception:
+            pass
+
+    def _catalog_split(self):
+        """Favourites and everything else, in sorted order; rebuilt when favourites change."""
+        with self._catalog_lock:
+            favorites = frozenset(self.favorites)
+            cached = getattr(self, "_catalog_split_cache", None)
+            if cached is None or getattr(self, "_catalog_fav_snapshot", None) != favorites:
+                favs, others = [], []
+                for entry in self._catalog_index():
+                    (favs if entry[4] in favorites else others).append(entry)
+                self._catalog_split_cache = (favs, others)
+                self._catalog_fav_snapshot = favorites
+            return self._catalog_split_cache
 
     def catalog_entries(self, query="", limit=None):
-        if self._catalog_cache is None:
-            entries = []
-            # Exclude metadata and VSRG; those are not Sky songNotes files.
-            roots = [os.path.join(APP_DIR, "songs", folder) for folder in ("Songs", "Multi-Sheet Songs")]
-            roots.append(self.CUSTOM_SONG_DIR)
-            for root in roots:
-                for base, _, files in os.walk(root):
-                    for name in files:
-                        if name.lower().endswith((".txt", ".json")):
-                            path = os.path.join(base, name)
-                            try:
-                                entries.append((name, path, os.path.getsize(path), name.casefold()))
-                            except OSError:
-                                continue
-            self._catalog_cache = entries
         needle = query.casefold().strip()
-        matched = [e for e in self._catalog_cache if not needle or needle in e[3]]
-        matched.sort(key=lambda e: (song_path_key(e[1]) not in self.favorites, e[3], e[1]))
+        favs, others = self._catalog_split()
+        if needle:
+            favs = [entry for entry in favs if needle in entry[3]]
+            others = [entry for entry in others if needle in entry[3]]
+        matched = favs + others
         if limit is not None:
             matched = matched[:limit]
-        return [(name, path, size) for name, path, size, _lower in matched]
+        return [(name, path, size) for name, path, size, _lower, _key in matched]
 
     def catalog_page(self, query="", page=0, per_page=None, entries=None):
-        """Page 0 is the favourites page; later pages hold 300 songs each."""
+        """Page 0 starts with favourites; every page holds at most 300 songs."""
         per_page = per_page or self.CATALOG_LIMIT
-        if entries is None:
-            entries = self.catalog_entries(query)
-        if not query.strip():
-            favorites = [e for e in entries if song_path_key(e[1]) in self.favorites]
-            others = [e for e in entries if song_path_key(e[1]) not in self.favorites]
-            pages = max(1, (len(others) + per_page - 1) // per_page)
-            page = max(0, min(int(page), pages))
-            if page == 0:
-                return favorites, 0, pages + 1, "favorites", len(others), len(favorites)
-            start = (page - 1) * per_page
-            return others[start:start + per_page], page, pages + 1, "songs", len(others), len(favorites)
-        pages = max(1, (len(entries) + per_page - 1) // per_page)
+        needle = query.casefold().strip()
+        favs, others = self._catalog_split()
+        if needle:
+            favs = [entry for entry in favs if needle in entry[3]]
+            others = [entry for entry in others if needle in entry[3]]
+            matched = favs + others
+            pages = max(1, (len(matched) + per_page - 1) // per_page)
+            page = max(0, min(int(page), pages - 1))
+            rows = matched[page * per_page:(page + 1) * per_page]
+            return ([(name, path, size) for name, path, size, _l, _k in rows],
+                    page, pages, "search", len(matched), 0)
+
+        fav_pages = max(1, (len(favs) + per_page - 1) // per_page)
+        song_pages = (len(others) + per_page - 1) // per_page
+        pages = fav_pages + song_pages
         page = max(0, min(int(page), pages - 1))
-        return (entries[page * per_page:(page + 1) * per_page], page, pages,
-                "search", len(entries), 0)
+        if page < fav_pages:
+            rows = favs[page * per_page:(page + 1) * per_page]
+            return ([(name, path, size) for name, path, size, _l, _k in rows],
+                    page, pages, "favorites", len(favs), len(favs))
+        song_page = page - fav_pages
+        rows = others[song_page * per_page:(song_page + 1) * per_page]
+        return ([(name, path, size) for name, path, size, _l, _k in rows],
+                page, pages, "songs", len(others), len(favs))
 
     def import_song_file(self, path):
         """Validate before copying; never overwrite a different song with the same name."""
@@ -852,6 +918,7 @@ class HudApp:
                     pass
                 raise
         self._catalog_cache = None
+        self._catalog_split_cache = None
         return dest
 
     def toggle_favorite(self, path):
@@ -907,6 +974,16 @@ class HudApp:
         if not self.song:
             self.status("Сначала загрузите песню", err=True)
             return None
+        existing = getattr(self, "_map_window", None)
+        if existing is not None and existing.winfo_exists():
+            for refresh in list(self._map_refreshers):
+                try:
+                    refresh()
+                except tk.TclError:
+                    pass
+            existing.deiconify()
+            existing.lift()
+            return existing
         win = tk.Toplevel(self.panel)
         win.title("Sky HUD · карта песни")
         win.attributes("-topmost", True)
@@ -989,8 +1066,6 @@ class HudApp:
                 apply_boundary(win.pick_mode, self.preview_index)
             grid.select_step(self.preview_index, active_range())
             update_position()
-            if win.pick_mode is None:
-                sync_range_spins()
             self._redraw()
 
         body = tk.Frame(win, bg=pal["bg"])
@@ -1088,9 +1163,12 @@ class HudApp:
                 self._map_refreshers.remove(refresh_map)
             except ValueError:
                 pass
+            if getattr(self, "_map_window", None) is win:
+                self._map_window = None
 
         win.bind("<Destroy>", cleanup_map, add="+")
         win.protocol("WM_DELETE_WINDOW", win.destroy)
+        self._map_window = win
         self._map_refreshers.append(refresh_map)
         refresh_map()
         return win
@@ -1303,10 +1381,7 @@ class HudApp:
             if reset:
                 win.catalog_page = 0
             query = q.get()
-            entries = self.catalog_entries(query)
-            win.catalog_all = entries
-            rows, page, pages, mode, total, fav_count = self.catalog_page(
-                query, win.catalog_page, entries=entries)
+            rows, page, pages, mode, total, fav_count = self.catalog_page(query, win.catalog_page)
             win.catalog_page = page
             win.catalog_mode = mode
             win.catalog_arr = rows
@@ -1337,8 +1412,9 @@ class HudApp:
             line = next((part.strip() for part in text.splitlines() if part.strip()), "")[:120]
             if not line:
                 return
+            if ent.selection_present():
+                ent.delete("sel.first", "sel.last")
             ent.insert("insert", line)
-            refresh()
 
         menu = tk.Menu(win, tearoff=0, bg=pal["panel"], fg=pal["text"], bd=0,
                        activebackground=pal["select"], activeforeground=pal["text"])
@@ -1413,6 +1489,16 @@ class HudApp:
             if win.winfo_exists():
                 win.destroy()
 
+        def cleanup_catalog(event=None):
+            if event is not None and event.widget is not win:
+                return
+            try:
+                self._catalog_refreshers.remove(refresh)
+            except ValueError:
+                pass
+
+        win.bind("<Destroy>", cleanup_catalog, add="+")
+
         self._catalog_refreshers.append(refresh)
         win.protocol("WM_DELETE_WINDOW", close_catalog)
         q.trace_add("write", lambda *_: refresh(reset=True))
@@ -1423,16 +1509,6 @@ class HudApp:
         tree.bind("<Return>", choose)
         refresh()
         return win
-
-    def _catalog_open(self, _event=None):
-        sel = self.catalog_list.curselection()
-        if not sel: return
-        path = self.catalog_paths[sel[0]]
-        try:
-            self.load_song_file(path)
-            self.status("Загружено из каталога: %s" % os.path.basename(path))
-        except Exception as e:
-            self.status("Ошибка каталога: %s" % e, err=True)
 
     # ---------------------------------------------------------- конфиг-геттеры
     def _on_cfg(self):
@@ -1632,7 +1708,6 @@ class HudApp:
             "base": time.perf_counter() + 0.8,
             "ev_idx": 0,
             "grid_idx": 0,
-            "grid": [i * tl["gap"] for i in range(int(tl["end_t"] // tl["gap"]) + 2)],
             "stats": {"ok": 0, "miss": 0, "bad": 0, "streak": 0, "best": 0},
             "mode": self.mode,
             "step_idx": 0,
@@ -1726,7 +1801,7 @@ class HudApp:
             r["ev_idx"] += 1
         # метроном
         if r["mode"] == "train" and self.metro_on:
-            while r["grid_idx"] < len(r["grid"]) and r["grid"][r["grid_idx"]] <= now:
+            while r["grid_idx"] * tl["gap"] <= now:
                 if self.sound_on:
                     accent = r["grid_idx"] % 4 == 0
                     self.sound.beep(1760 if accent else 1250, 55 if accent else 35)
@@ -2046,7 +2121,6 @@ def check_mode(paths):
     # Diagnostic output must not fail on Western Windows console encodings.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="backslashreplace")
-    import random
     ok = True
 
     def t(name, cond, extra=""):
@@ -2086,10 +2160,6 @@ def check_mode(paths):
                 stats["bad"] += 1
         t("perfect play all hit", stats["bad"] == 0, str(stats))
         # без нажатий — все в промахи
-        stats2 = {"ok": 0, "miss": 0, "bad": 0}
-        for inst in tl["instances"]:
-            if not inst["consumed"] and tl["end_t"] + 100 > inst["close"]:
-                pass
         misses = sum(1 for i in tl["instances"] if i["close"] <= tl["end_t"] + 1)
         t("all notes eventually miss", misses == len(tl["instances"]), "%d/%d" % (misses, len(tl["instances"])))
         # раннее нажатие (до open) — не попадание
@@ -2148,7 +2218,7 @@ def main():
         except Exception:
             pass
         root = tk.Tk()
-        app = HudApp(root)
+        HudApp(root)
         root.mainloop()
 
 

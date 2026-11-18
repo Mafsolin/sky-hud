@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 import tkinter as tk
@@ -914,6 +915,123 @@ class HudTests(unittest.TestCase):
         self.assertEqual(len(tl["evs"]), 1)
         self.assertEqual([n["key"] for n in tl["evs"][0]["notes"]], [0])
         self.assertEqual(len(tl["instances"]), 1)
+
+    def test_huge_note_times_are_ignored_and_step_start_is_instant(self):
+        path = Path(self.tmp.name) / "huge.txt"
+        path.write_text('{"songNotes":[{"time":0,"key":"1Key0"},{"time":100,"key":"1Key1"},'
+                        '{"time":1e308,"key":"1Key2"}]}', encoding="utf-8")
+        self.app.load_song_file(str(path))
+        self.assertLess(self.app.song["dur_ms"], hud.MAX_SONG_MS)
+        self.app.mode = "step"
+        started = time.perf_counter()
+        self.app.start()
+        self.assertLess(time.perf_counter() - started, 0.5)
+        self.assertIsNotNone(self.app.run)
+        self.assertNotIn("grid", self.app.run)
+        self.app.stop()
+
+    def test_broken_config_types_fall_back_to_safe_defaults(self):
+        cfg = Path(self.tmp.name) / "bad-config.json"
+        cases = (("[]", (1.0, 0.85, "step")),
+                 ('{"scale":"bad","alpha":9,"mode":"train","parts":"x"}', (1.0, 1.0, "step")))
+        for payload, expected in cases:
+            cfg.write_text(payload, encoding="utf-8")
+            with patch.object(hud.HudApp, "CFG_FILE", str(cfg)):
+                root = tk.Tk()
+                root.geometry("+10000+10000")
+                app = hud.HudApp(root)
+                try:
+                    self.assertEqual((app.scale, app.alpha, app.mode), expected)
+                finally:
+                    app.quit()
+
+    def test_broken_key_number_does_not_discard_valid_zero_based_notes(self):
+        song = hud.parse_song('{"songNotes":[{"time":0,"key":"1Key0"},{"time":10,"key":"1Key99"}]}')
+        self.assertEqual(song["parts"][0]["events"], [(0.0, [0])])
+
+    def test_empty_song_list_is_a_format_error(self):
+        with self.assertRaises(ValueError):
+            hud.parse_song("[]")
+
+    def test_non_numeric_bpm_is_normalised(self):
+        song = hud.parse_song('{"bpm":"fast","songNotes":[{"time":0,"key":"1Key0"}]}')
+        self.assertEqual(song["bpm"], 0.0)
+        self.assertEqual(hud.parse_song('{"bpm":"120","songNotes":[{"time":0,"key":"1Key0"}]}')["bpm"], 120.0)
+        path = Path(self.tmp.name) / "bpm.txt"
+        path.write_text('{"name":"BPM","bpm":"fast","songNotes":[{"time":0,"key":"1Key0"}]}',
+                        encoding="utf-8")
+        self.app.load_song_file(str(path))
+        self.assertEqual(self.app.song["name"], "BPM")
+
+    def test_paste_replaces_the_selected_query(self):
+        win = self.app.open_catalog()
+        try:
+            self.root.update()
+            win.catalog_query.set("abc")
+            self.root.update()
+            win.catalog_entry.selection_range(0, "end")
+            self.root.clipboard_clear()
+            self.root.clipboard_append("xyz")
+            self.root.update()
+            win.catalog_paste()
+            self.root.update()
+            self.assertEqual(win.catalog_query.get(), "xyz")
+        finally:
+            win.destroy()
+
+    def test_favourite_pages_are_capped_and_empty_catalog_has_one_page(self):
+        entries = [("f%03d.txt" % i, "E:/songs/f%03d.txt" % i, 1, "f%03d.txt" % i,
+                    "e:/songs/f%03d.txt" % i) for i in range(340)]
+        self.app._catalog_cache = entries
+        self.app.favorites = {entry[4] for entry in entries}
+        self.app._catalog_split_cache = None
+        rows, page, pages, mode, total, fav = self.app.catalog_page("", 0)
+        self.assertEqual((len(rows), page, pages, mode, fav), (300, 0, 2, "favorites", 340))
+        rows, page, pages, mode, total, fav = self.app.catalog_page("", 1)
+        self.assertEqual((len(rows), page, mode), (40, 1, "favorites"))
+        self.app._catalog_cache = []
+        self.app.favorites = set()
+        self.app._catalog_split_cache = None
+        rows, page, pages, mode, total, fav = self.app.catalog_page("", 0)
+        self.assertEqual((rows, pages, mode), ([], 1, "favorites"))
+        self.app._catalog_cache = None
+        self.app._catalog_split_cache = None
+
+    def test_catalog_destroy_unregisters_refresh(self):
+        win = self.app.open_catalog()
+        self.root.update()
+        self.assertTrue(self.app._catalog_refreshers)
+        win.destroy()
+        self.root.update()
+        self.assertFalse(self.app._catalog_refreshers)
+
+    def test_map_click_does_not_overwrite_manual_practice_range(self):
+        notes = ",".join('{"time":%d,"key":"1Key0"}' % (i * 100) for i in range(25))
+        path = Path(self.tmp.name) / "long.txt"
+        path.write_text('{"songNotes":[%s]}' % notes, encoding="utf-8")
+        self.app.load_song_file(str(path))
+        win = self.app.open_map()
+        win.geometry("+10000+10000")
+        try:
+            self.root.update()
+            win.range_from.set("4")
+            win.range_to.set("9")
+            win.select_step(15)
+            self.root.update()
+            self.assertEqual((win.range_from.get(), win.range_to.get()), ("4", "9"))
+        finally:
+            win.destroy()
+            self.root.update()
+
+    def test_open_map_reuses_one_window(self):
+        self.app.load_demo()
+        win = self.app.open_map()
+        win.geometry("+10000+10000")
+        try:
+            self.assertIs(self.app.open_map(), win)
+        finally:
+            win.destroy()
+            self.root.update()
 
 
 if __name__ == "__main__":
