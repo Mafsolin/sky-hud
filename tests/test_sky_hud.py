@@ -169,6 +169,14 @@ class HudTests(unittest.TestCase):
         finally:
             win.destroy()
 
+    @staticmethod
+    def _titlebar_dark(win):
+        import ctypes
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id()) or win.winfo_id()
+        value = ctypes.c_int(-1)
+        ctypes.windll.dwmapi.DwmGetWindowAttribute(hwnd, 20, ctypes.byref(value), ctypes.sizeof(value))
+        return value.value
+
     def test_light_and_dark_themes_are_applied_to_panel_and_catalog(self):
         for theme in ("light", "dark"):
             with patch.object(hud, "system_theme", return_value=theme):
@@ -179,10 +187,14 @@ class HudTests(unittest.TestCase):
                     self.assertEqual(app2.theme, theme)
                     self.assertEqual(app2.panel.cget("bg"), hud.THEMES[theme]["bg"])
                     self.assertEqual(app2.lb_go.cget("bg"), hud.THEMES[theme]["button"])
+                    self.root.update()
+                    self.assertEqual(self._titlebar_dark(app2.panel), 1 if theme == "dark" else 0)
                     win = app2.open_catalog()
                     win.geometry("+10000+10000")
+                    self.root.update()
                     self.assertEqual(win.cget("bg"), hud.THEMES[theme]["bg"])
                     self.assertEqual(win.catalog_tree.cget("style"), "Sky.Treeview")
+                    self.assertEqual(self._titlebar_dark(win), 1 if theme == "dark" else 0)
                     win.destroy()
                 finally:
                     app2.quit()

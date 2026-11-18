@@ -152,7 +152,7 @@ THEMES = {
     },
     "light": {
         "bg": "#f4f6f9", "panel": "#ffffff", "text": "#1c2430", "muted": "#5f6b7a",
-        "button": "#e9eef5", "button_active": "#d8e2ef", "border": "#d3dbe6",
+        "button": "#e4ebf5", "button_active": "#cfdcec", "border": "#c3cfdd",
         "entry": "#ffffff", "select": "#d8e2ef", "accent": "#1f6feb",
         "error": "#c0392b", "ok": "#1f7a3a", "scale": "#c9d4e2",
     },
@@ -432,6 +432,7 @@ class HudApp:
         self.panel.protocol("WM_DELETE_WINDOW", self.quit)
         self._build_panel()
         self.place_panel()
+        self._theme_titlebar(self.panel)
 
         if start_song is not None:
             self.set_song(start_song)
@@ -614,11 +615,29 @@ class HudApp:
                 pass
 
     # ---------------------------------------------------------- панель
+    def _theme_titlebar(self, window):
+        """Paint the native Windows title bar to match the light/dark palette."""
+        def apply(_event=None):
+            try:
+                hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
+                if not hwnd:
+                    hwnd = window.winfo_id()
+                value = ctypes.c_int(1 if self.theme == "dark" else 0)
+                for attribute in (20, 19):
+                    if ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                            hwnd, attribute, ctypes.byref(value), ctypes.sizeof(value)) == 0:
+                        break
+            except Exception:
+                pass
+        window.bind("<Map>", apply, add="+")
+        apply()
+
     def _btn(self, parent, text, command, **kw):
         pal = self.palette
         opts = dict(text=text, command=command, bg=pal["button"], fg=pal["text"],
                     activebackground=pal["button_active"], activeforeground=pal["text"],
-                    relief="flat", bd=0, padx=10, pady=4, highlightthickness=0,
+                    relief="flat", bd=0, padx=10, pady=4, highlightthickness=1,
+                    highlightbackground=pal["border"], highlightcolor=pal["border"],
                     font=("Segoe UI", 9))
         opts.update(kw)
         return tk.Button(parent, **opts)
@@ -632,6 +651,12 @@ class HudApp:
     def _build_panel(self):
         p = self.panel
         pal = self.palette
+        head = tk.Frame(p, bg=pal["bg"])
+        head.pack(fill="x", padx=8, pady=(6, 2))
+        tk.Label(head, text="Sky HUD", anchor="w", bg=pal["bg"], fg=pal["text"],
+                 font=("Segoe UI", 12, "bold")).pack(side="left")
+        tk.Label(head, text="v" + APP_VERSION, anchor="e", bg=pal["bg"], fg=pal["muted"],
+                 font=("Segoe UI", 8)).pack(side="right")
         f = tk.Frame(p, bg=pal["bg"])
         f.pack(fill="x", padx=6, pady=(6, 0))
         self._btn(f, "Каталог нот", self.open_catalog).pack(side="left", padx=2)
@@ -872,6 +897,7 @@ class HudApp:
         win.minsize(700, 430)
         pal = self.palette
         win.configure(bg=pal["bg"])
+        self._theme_titlebar(win)
         tk.Label(win, text="Карта песни · один ход — сетка 5 × 3 · нажмите на нужный ход",
                  anchor="w", font=("Segoe UI", 11, "bold"), bg=pal["bg"], fg=pal["text"]).pack(
                      fill="x", padx=12, pady=(10, 6))
@@ -1057,6 +1083,7 @@ class HudApp:
         win.geometry("430x320%+d+%d" % (max(20, px + 20), max(20, py + 20)))
         pal = self.palette
         win.configure(bg=pal["bg"])
+        self._theme_titlebar(win)
         win._release = None
         cancelled = threading.Event()
         jobs = []
@@ -1184,6 +1211,7 @@ class HudApp:
         px, py = self.panel.winfo_rootx(), self.panel.winfo_rooty()
         win.geometry("620x700%+d%+d" % (px, max(20, py-350)))
         win.configure(bg=pal["bg"])
+        self._theme_titlebar(win)
         win.attributes("-topmost", True)
         head = tk.Frame(win, bg=pal["bg"], padx=18, pady=16)
         head.pack(fill="x")
