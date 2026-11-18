@@ -59,7 +59,7 @@ class LiveMapTests(unittest.TestCase):
             for key, item in enumerate(card["keys"]):
                 self.assertEqual(grid.type(item), "rectangle")
                 self.assertEqual(grid.itemcget(item, "fill"),
-                    hud.HudApp.HUD_COLORS["now"] if key in (0, 7, 14) else hud.HudApp.HUD_COLORS["key"])
+                    self.app.map_palette()["now"] if key in (0, 7, 14) else self.app.map_palette()["key"])
             self.assertFalse(any(isinstance(w, hud.ttk.Treeview) for w in win.winfo_children()))
         finally:
             win.destroy()

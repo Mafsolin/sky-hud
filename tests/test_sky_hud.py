@@ -127,6 +127,66 @@ class HudTests(unittest.TestCase):
         finally:
             win.destroy()
 
+    def test_catalog_shows_300_and_search_finds_songs_beyond_the_first_page(self):
+        folder = Path(hud.APP_DIR) / "songs" / "Songs" / "Bulk"
+        folder.mkdir(parents=True, exist_ok=True)
+        note = '{"songNotes":[{"time":0,"key":"1Key0"}]}'
+        for i in range(340):
+            (folder / ("zz bulk %03d.txt" % i)).write_text(note, encoding="utf-8")
+        self.app._catalog_cache = None
+        win = self.app.open_catalog()
+        try:
+            self.root.update()
+            tree = win.catalog_tree
+            self.assertEqual(len(tree.get_children()), 300)
+            self.assertIn("300", win.catalog_count.cget("text"))
+            win.catalog_query.set("zz bulk 339")
+            self.root.update()
+            rows = tree.get_children()
+            self.assertEqual(len(rows), 1)
+            self.assertIn("zz bulk 339", tree.item(rows[0], "values")[1])
+        finally:
+            win.destroy()
+
+    def test_catalog_paste_works_from_ctrl_v_and_context_menu(self):
+        win = self.app.open_catalog()
+        try:
+            self.root.update()
+            self.assertTrue(win.catalog_entry.bind("<Control-v>"))
+            self.root.clipboard_clear()
+            self.root.clipboard_append("Flower Dance")
+            self.root.update()
+            win.catalog_paste()
+            self.root.update()
+            self.assertEqual(win.catalog_query.get(), "Flower Dance")
+            win.catalog_entry.delete(0, "end")
+            self.root.clipboard_clear()
+            self.root.clipboard_append("Alpha")
+            self.root.update()
+            win.catalog_menu.invoke(0)
+            self.root.update()
+            self.assertEqual(win.catalog_query.get(), "Alpha")
+        finally:
+            win.destroy()
+
+    def test_light_and_dark_themes_are_applied_to_panel_and_catalog(self):
+        for theme in ("light", "dark"):
+            with patch.object(hud, "system_theme", return_value=theme):
+                root2 = tk.Tk()
+                root2.geometry("+10000+10000")
+                app2 = hud.HudApp(root2)
+                try:
+                    self.assertEqual(app2.theme, theme)
+                    self.assertEqual(app2.panel.cget("bg"), hud.THEMES[theme]["bg"])
+                    self.assertEqual(app2.lb_go.cget("bg"), hud.THEMES[theme]["button"])
+                    win = app2.open_catalog()
+                    win.geometry("+10000+10000")
+                    self.assertEqual(win.cget("bg"), hud.THEMES[theme]["bg"])
+                    self.assertEqual(win.catalog_tree.cget("style"), "Sky.Treeview")
+                    win.destroy()
+                finally:
+                    app2.quit()
+
     def test_loop_is_enabled_by_default_for_new_settings(self):
         self.assertTrue(self.app.loop_on)
         self.assertTrue(self.app.v_loop.get())

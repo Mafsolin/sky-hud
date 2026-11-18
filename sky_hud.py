@@ -40,7 +40,7 @@ import sky_updater
 from sky_song_map import SongMapGrid
 
 APP_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
-APP_VERSION = "1.1.6"
+APP_VERSION = "1.1.7"
 UPDATE_REPO = "Mafsolin/sky-hud"
 
 
@@ -142,6 +142,36 @@ PART_COLORS = [  # r,g,b
 ]
 
 BASE_C4 = 261.6256
+
+THEMES = {
+    "dark": {
+        "bg": "#182733", "panel": "#1f3140", "text": "#f5efdf", "muted": "#b8c6c9",
+        "button": "#283945", "button_active": "#3e5864", "border": "#3e5864",
+        "entry": "#283945", "select": "#3e5864", "accent": "#6edaff",
+        "error": "#ff9999", "ok": "#7fe08a", "scale": "#3e5864",
+    },
+    "light": {
+        "bg": "#f4f6f9", "panel": "#ffffff", "text": "#1c2430", "muted": "#5f6b7a",
+        "button": "#e9eef5", "button_active": "#d8e2ef", "border": "#d3dbe6",
+        "entry": "#ffffff", "select": "#d8e2ef", "accent": "#1f6feb",
+        "error": "#c0392b", "ok": "#1f7a3a", "scale": "#c9d4e2",
+    },
+}
+
+
+def system_theme():
+    """Return the Windows app theme: light unless apps are configured dark."""
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                             r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+        try:
+            return "light" if winreg.QueryValueEx(key, "AppsUseLightTheme")[0] else "dark"
+        finally:
+            key.Close()
+    except Exception:
+        return "dark"
+
 
 # ---------------------------------------------------------------- парсер
 def parse_song(text, src_name="песня"):
@@ -342,6 +372,7 @@ class SoundBus:
 class HudApp:
     CFG_FILE = os.path.join(APP_DIR, "sky_hud_config.json")
     CUSTOM_SONG_DIR = os.path.join(APP_DIR, "songs", "User Songs")
+    CATALOG_LIMIT = 300
 
     def __init__(self, root, start_song=None):
         self.root = root
@@ -373,6 +404,8 @@ class HudApp:
         self._map_refreshers = []
         self.preview_index = 0
         self.practice_range = None
+        self.theme = system_theme()
+        self.palette = THEMES[self.theme]
 
         # ---- окно HUD: поверх всего, без рамки, без фокуса, клики проходят сквозь
         root.title("Sky HUD")
@@ -394,6 +427,7 @@ class HudApp:
         # ---- панель управления (обычное окно)
         self.panel = tk.Toplevel(root)
         self.panel.title("Sky HUD — управление")
+        self.panel.configure(bg=self.palette["bg"])
         self.panel.attributes("-topmost", True)
         self.panel.protocol("WM_DELETE_WINDOW", self.quit)
         self._build_panel()
@@ -565,130 +599,159 @@ class HudApp:
             "last_song": self.song_path,
         }
         self.cfg = cfg
+        # Атомарная запись: пишем во временный файл, потом переименовываем
+        import tempfile
+        import os
+        tmp = self.CFG_FILE + ".tmp"
         try:
-            with open(self.CFG_FILE, "w", encoding="utf-8") as f:
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=1)
+            os.replace(tmp, self.CFG_FILE)
         except Exception:
-            pass
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
 
     # ---------------------------------------------------------- панель
+    def _btn(self, parent, text, command, **kw):
+        pal = self.palette
+        opts = dict(text=text, command=command, bg=pal["button"], fg=pal["text"],
+                    activebackground=pal["button_active"], activeforeground=pal["text"],
+                    relief="flat", bd=0, padx=10, pady=4, highlightthickness=0,
+                    font=("Segoe UI", 9))
+        opts.update(kw)
+        return tk.Button(parent, **opts)
+
+    def _label(self, parent, text="", **kw):
+        pal = self.palette
+        opts = dict(text=text, bg=pal["bg"], fg=pal["text"], font=("Segoe UI", 9))
+        opts.update(kw)
+        return tk.Label(parent, **opts)
+
     def _build_panel(self):
         p = self.panel
-        pad = dict(padx=6, pady=3)
-        r = 0
-
-        def row():
-            return r
-        f = tk.Frame(p)
+        pal = self.palette
+        f = tk.Frame(p, bg=pal["bg"])
         f.pack(fill="x", padx=6, pady=(6, 0))
-        tk.Button(f, text="Каталог нот", command=self.open_catalog).pack(side="left", padx=2)
-        tk.Button(f, text="Открыть карту", command=self.open_map).pack(side="left", padx=2)
-        self.lb_go = tk.Button(f, text="▶ Старт", width=8, command=self.toggle_run)
+        self._btn(f, "Каталог нот", self.open_catalog).pack(side="left", padx=2)
+        self._btn(f, "Открыть карту", self.open_map).pack(side="left", padx=2)
+        self.lb_go = self._btn(f, "▶ Старт", self.toggle_run, width=8)
         self.lb_go.pack(side="left")
-        self.lb_hide = tk.Button(f, text="Показать HUD" if self.hud_hidden else "Скрыть HUD полностью",
-                                 command=self.toggle_hud)
+        self.lb_hide = self._btn(f, "Показать HUD" if self.hud_hidden else "Скрыть HUD полностью", self.toggle_hud)
         self.lb_hide.pack(side="left", padx=(8, 0))
-        tk.Button(f, text="Настройки", command=self.open_settings).pack(side="left", padx=(6, 0))
+        self._btn(f, "Настройки", self.open_settings).pack(side="left", padx=(6, 0))
         self.mode_btns = {}
 
-        song_row = tk.Frame(p)
+        song_row = tk.Frame(p, bg=pal["bg"])
         song_row.pack(fill="x", padx=8)
-        self.lb_song = tk.Label(song_row, text="—", anchor="w", font=("Segoe UI", 9, "bold"))
+        self.lb_song = tk.Label(song_row, text="—", anchor="w", bg=pal["bg"], fg=pal["text"],
+                                font=("Segoe UI", 9, "bold"))
         self.lb_song.pack(side="left", fill="x", expand=True)
-        self.favorite_button = tk.Button(song_row, text="☆", width=3,
-                                         command=self.toggle_selected_favorite)
+        self.favorite_button = self._btn(song_row, "☆", self.toggle_selected_favorite, width=3)
         self.favorite_button.pack(side="right", padx=(6, 0))
-        self.lb_meta = tk.Label(p, text="", anchor="w", fg="#666", font=("Segoe UI", 8))
+        self.lb_meta = tk.Label(p, text="", anchor="w", bg=pal["bg"], fg=pal["muted"],
+                                font=("Segoe UI", 8))
         self.lb_meta.pack(fill="x", padx=8)
 
         # локальный каталог нот внутри HUD
-        cat = tk.LabelFrame(p, text="Каталог нот", padx=4, pady=4)
+        cat = tk.LabelFrame(p, text="Каталог нот", padx=4, pady=4, bg=pal["bg"], fg=pal["text"],
+                            highlightthickness=0, bd=0)
         cat.pack(fill="both", padx=6, pady=(4, 2))
         self.catalog_query = tk.StringVar()
-        ent = tk.Entry(cat, textvariable=self.catalog_query)
+        ent = tk.Entry(cat, textvariable=self.catalog_query, bg=pal["entry"], fg=pal["text"],
+                       insertbackground=pal["text"], relief="flat", highlightthickness=0,
+                       font=("Segoe UI", 9))
         ent.pack(side="left", fill="x", expand=True)
         ent.insert(0, "Поиск песни…")
-        ent.bind("<FocusIn>", lambda e: ent.delete(0, "end") if ent.get()=="Поиск песни…" else None)
-        tk.Button(cat, text="Найти", command=self._refresh_catalog).pack(side="left", padx=(4,0))
-        self.catalog_list = tk.Listbox(cat, height=5, exportselection=False)
-        self.catalog_list.pack(fill="both", expand=True, pady=(5,0))
+        ent.bind("<FocusIn>", lambda e: ent.delete(0, "end") if ent.get()== "Поиск песни…" else None)
+        self._btn(cat, "Найти", self._refresh_catalog).pack(side="left", padx=(4, 0))
+        self.catalog_list = tk.Listbox(cat, height=5, exportselection=False, bg=pal["entry"],
+                                       fg=pal["text"], selectbackground=pal["select"],
+                                       selectforeground=pal["text"], relief="flat",
+                                       highlightthickness=0, bd=0)
+        self.catalog_list.pack(fill="both", expand=True, pady=(5, 0))
         self.catalog_list.bind("<Double-Button-1>", self._catalog_open)
         self.catalog_paths = []
         self._refresh_catalog()
         cat.pack_forget()
 
         self.part_vars = {}
-        self.part_frame = tk.Frame(p)
+        self.part_frame = tk.Frame(p, bg=pal["bg"])
         self.part_frame.pack_forget()
 
-        f2 = tk.Frame(p)
+        f2 = tk.Frame(p, bg=pal["bg"])
         f2.pack(fill="x", padx=6)
         self.v_metro = tk.BooleanVar(value=self.metro_on)
         self.v_sound = tk.BooleanVar(value=self.sound_on)
         self.v_loop = tk.BooleanVar(value=self.loop_on)
-        self.cb_metro = tk.Checkbutton(f2, text="Метроном", variable=self.v_metro, command=self._on_cfg)
+
+        def check(parent, text, var):
+            return tk.Checkbutton(parent, text=text, variable=var, command=self._on_cfg,
+                                  bg=pal["bg"], fg=pal["text"], activebackground=pal["bg"],
+                                  activeforeground=pal["text"], selectcolor=pal["panel"],
+                                  highlightthickness=0, bd=0, font=("Segoe UI", 9))
+
+        self.cb_metro = check(f2, "Метроном", self.v_metro)
         self.cb_metro.pack(side="left")
-        tk.Checkbutton(f2, text="Звук", variable=self.v_sound, command=self._on_cfg).pack(side="left")
-        self.cb_loop = tk.Checkbutton(f2, text="Повтор (цикл)", variable=self.v_loop, command=self._on_cfg)
+        check(f2, "Звук", self.v_sound).pack(side="left")
+        self.cb_loop = check(f2, "Повтор (цикл)", self.v_loop)
         self.cb_loop.pack(side="left")
-        tk.Label(f2, text="Темп").pack(side="left", padx=(10, 2))
+        tk.Label(f2, text="Темп", bg=pal["bg"], fg=pal["text"], font=("Segoe UI", 9)).pack(side="left", padx=(10, 2))
         self.v_tempo = tk.StringVar(value=str(self.tempo))
         cb = tk.OptionMenu(f2, self.v_tempo, "0.5", "0.75", "1", "1.25", "1.5", command=lambda _: self._on_cfg())
-        cb.config(width=3)
+        cb.config(width=3, bg=pal["button"], fg=pal["text"], activebackground=pal["button_active"],
+                  activeforeground=pal["text"], relief="flat", highlightthickness=0, bd=0)
+        cb["menu"].config(bg=pal["panel"], fg=pal["text"], activebackground=pal["select"],
+                          activeforeground=pal["text"])
         cb.pack(side="left")
 
-        f3 = tk.Frame(p)
+        f3 = tk.Frame(p, bg=pal["bg"])
         f3.pack(fill="x", padx=6)
-        tk.Label(f3, text="Масштаб").pack(side="left")
+        tk.Label(f3, text="Масштаб", bg=pal["bg"], fg=pal["text"], font=("Segoe UI", 9)).pack(side="left")
         self.s_scale = tk.Scale(f3, from_=0.5, to=2.0, resolution=0.05, orient="horizontal",
-                                showvalue=False, command=lambda v: self._set_scale(float(v)))
+                                showvalue=False, command=lambda v: self._set_scale(float(v)),
+                                bg=pal["bg"], fg=pal["text"], troughcolor=pal["scale"],
+                                highlightthickness=0, bd=1, width=12, sliderlength=22,
+                                sliderrelief="raised", activebackground=pal["button_active"])
         self.s_scale.set(self.scale)
         self.s_scale.pack(side="left", fill="x", expand=True)
-        tk.Label(f3, text="Прозрачность").pack(side="left", padx=(8, 0))
+        tk.Label(f3, text="Прозрачность", bg=pal["bg"], fg=pal["text"], font=("Segoe UI", 9)).pack(side="left", padx=(8, 0))
         self.s_alpha = tk.Scale(f3, from_=0.35, to=1.0, resolution=0.05, orient="horizontal",
-                                showvalue=False, command=self._set_alpha)
+                                showvalue=False, command=self._set_alpha,
+                                bg=pal["bg"], fg=pal["text"], troughcolor=pal["scale"],
+                                highlightthickness=0, bd=1, width=12, sliderlength=22,
+                                sliderrelief="raised", activebackground=pal["button_active"])
         self.s_alpha.set(self.alpha)
         self.s_alpha.pack(side="left", fill="x", expand=True)
 
-        f4 = tk.Frame(p)
+        f4 = tk.Frame(p, bg=pal["bg"])
         f4.pack(fill="x", padx=6, pady=(0, 2))
         for t, d in (("←", (-12, 0)), ("→", (12, 0)), ("↑", (0, -12)), ("↓", (0, 12))):
-            tk.Button(f4, text=t, width=3, command=lambda d=d: self.nudge(*d)).pack(side="left")
-        tk.Button(f4, text="По центру низа", command=self.place_bottom).pack(side="left", padx=8)
-        tk.Button(f4, text="✕ Закрыть", command=self.quit).pack(side="right")
+            self._btn(f4, t, lambda d=d: self.nudge(*d), width=3, padx=4).pack(side="left")
+        self._btn(f4, "По центру низа", self.place_bottom).pack(side="left", padx=8)
+        self._btn(f4, "✕ Закрыть", self.quit).pack(side="right")
 
-        self.lb_stats = tk.Label(p, text="", fg="#0a0", font=("Segoe UI", 9))
+        self.lb_stats = tk.Label(p, text="", fg=pal["ok"], bg=pal["bg"], font=("Segoe UI", 9))
         self.lb_status = tk.Label(p, text="Загрузите файл песни (.txt/.json) или нажмите «Пример»",
-                                  fg="#888", anchor="w", wraplength=430, justify="left",
-                                  font=("Segoe UI", 8))
+                                  fg=pal["muted"], bg=pal["bg"], anchor="w", wraplength=430,
+                                  justify="left", font=("Segoe UI", 8))
         self.lb_status.pack(fill="x", padx=8, pady=(0, 6))
         self.sync_panel_controls()
         self.sync_favorite_button()
         f2.pack_forget()
 
     def _refresh_catalog(self):
-        root = os.path.join(APP_DIR, "songs")
-        q = self.catalog_query.get().strip().lower() if hasattr(self, "catalog_query") else ""
-        if q == "поиск песни…": q = ""
-        paths = []
-        for base, _, files in os.walk(root):
-            for name in files:
-                if not name.lower().endswith((".txt", ".json")):
-                    continue
-                relative = os.path.relpath(os.path.join(base, name), root).replace(os.sep, "/")
-                if not (relative.startswith("Songs/") or relative.startswith("Multi-Sheet Songs/")
-                        or relative.startswith("User Songs/")):
-                    continue
-                if not q or q in name.lower():
-                    paths.append(os.path.join(base, name))
-        paths.sort(key=lambda x: os.path.basename(x).lower())
-        self.catalog_paths = paths[:500]
+        q = self.catalog_query.get().strip() if hasattr(self, "catalog_query") else ""
+        if q.casefold() == "поиск песни…".casefold():
+            q = ""
+        self.catalog_paths = [path for _, path, _ in self.catalog_entries(q, limit=self.CATALOG_LIMIT)]
         if hasattr(self, "catalog_list"):
             self.catalog_list.delete(0, "end")
             for path in self.catalog_paths:
                 self.catalog_list.insert("end", os.path.basename(path))
 
-    def catalog_entries(self, query=""):
+    def catalog_entries(self, query="", limit=None):
         if self._catalog_cache is None:
             entries = []
             # Exclude metadata and VSRG; those are not Sky songNotes files.
@@ -700,14 +763,16 @@ class HudApp:
                         if name.lower().endswith((".txt", ".json")):
                             path = os.path.join(base, name)
                             try:
-                                entries.append((name, path, os.path.getsize(path)))
+                                entries.append((name, path, os.path.getsize(path), name.casefold()))
                             except OSError:
                                 continue
             self._catalog_cache = entries
         needle = query.casefold().strip()
-        entries = [e for e in self._catalog_cache if not needle or needle in e[0].casefold()]
-        return sorted(entries, key=lambda e: (song_path_key(e[1]) not in self.favorites,
-                                              e[0].casefold(), e[1]))
+        matched = [e for e in self._catalog_cache if not needle or needle in e[3]]
+        matched.sort(key=lambda e: (song_path_key(e[1]) not in self.favorites, e[3], e[1]))
+        if limit is not None:
+            matched = matched[:limit]
+        return [(name, path, size) for name, path, size, _lower in matched]
 
     def import_song_file(self, path):
         """Validate before copying; never overwrite a different song with the same name."""
@@ -805,8 +870,11 @@ class HudApp:
         x, y = max(vx + 20, min(px - 180, vx + vw - 940)), max(vy + 20, min(py - 220, vy + vh - 740))
         win.geometry("900x680%+d%+d" % (x, y))
         win.minsize(700, 430)
+        pal = self.palette
+        win.configure(bg=pal["bg"])
         tk.Label(win, text="Карта песни · один ход — сетка 5 × 3 · нажмите на нужный ход",
-                 anchor="w", font=("Segoe UI", 11, "bold")).pack(fill="x", padx=12, pady=(10, 6))
+                 anchor="w", font=("Segoe UI", 11, "bold"), bg=pal["bg"], fg=pal["text"]).pack(
+                     fill="x", padx=12, pady=(10, 6))
 
         def rows():
             return self.preview_tl["evs"] if self.preview_tl else []
@@ -834,8 +902,8 @@ class HudApp:
             win.range_to.set(str(hi + 1))
 
         def set_pick_buttons():
-            win.start_button.config(relief="sunken" if win.pick_mode == "start" else "raised")
-            win.end_button.config(relief="sunken" if win.pick_mode == "end" else "raised")
+            win.start_button.config(bg=pal["button_active"] if win.pick_mode == "start" else pal["button"])
+            win.end_button.config(bg=pal["button_active"] if win.pick_mode == "end" else pal["button"])
 
         def apply_boundary(kind, index):
             if kind == "start":
@@ -879,9 +947,9 @@ class HudApp:
                 sync_range_spins()
             self._redraw()
 
-        body = tk.Frame(win)
+        body = tk.Frame(win, bg=pal["bg"])
         body.pack(fill="both", expand=True, padx=10, pady=4)
-        grid = SongMapGrid(body, self.HUD_COLORS, CODES, select)
+        grid = SongMapGrid(body, self.map_palette(), CODES, select)
         grid.pack(side="left", fill="both", expand=True)
         scrollbar = ttk.Scrollbar(body, orient="vertical", command=grid.yview)
         scrollbar.pack(side="right", fill="y")
@@ -889,31 +957,35 @@ class HudApp:
         win.map_grid = grid
         win.select_step = select
 
-        navigation = tk.Frame(win)
+        navigation = tk.Frame(win, bg=pal["bg"])
         navigation.pack(fill="x", padx=10, pady=(5, 4))
-        win.previous_button = tk.Button(navigation, text="← Предыдущий", command=lambda: select(self.preview_index - 1))
+        win.previous_button = self._btn(navigation, "← Предыдущий", lambda: select(self.preview_index - 1))
         win.previous_button.pack(side="left")
-        win.next_button = tk.Button(navigation, text="Следующий →", command=lambda: select(self.preview_index + 1))
+        win.next_button = self._btn(navigation, "Следующий →", lambda: select(self.preview_index + 1))
         win.next_button.pack(side="left", padx=6)
-        win.position_label = tk.Label(navigation, text="", anchor="w")
+        win.position_label = tk.Label(navigation, text="", anchor="w", bg=pal["bg"], fg=pal["text"])
         win.position_label.pack(side="left", padx=8)
-        tk.Label(navigation, text="Голубая рамка — выбранный ход · золотые — клавиши", fg="#666").pack(side="right")
+        tk.Label(navigation, text="Голубая рамка — выбранный ход · золотые — клавиши",
+                 fg=pal["muted"], bg=pal["bg"]).pack(side="right")
 
-        controls = tk.Frame(win)
+        controls = tk.Frame(win, bg=pal["bg"])
         controls.pack(fill="x", padx=10, pady=(0, 10))
-        tk.Label(controls, text="Практика ходов:").pack(side="left")
-        win.start_button = tk.Button(controls, text="Начало", width=8,
-                                     command=lambda: begin_pick("start"))
+        tk.Label(controls, text="Практика ходов:", bg=pal["bg"], fg=pal["text"]).pack(side="left")
+        win.start_button = self._btn(controls, "Начало", lambda: begin_pick("start"), width=8)
         win.start_button.pack(side="left", padx=(6, 2))
-        win.end_button = tk.Button(controls, text="Конец", width=8,
-                                   command=lambda: begin_pick("end"))
+        win.end_button = self._btn(controls, "Конец", lambda: begin_pick("end"), width=8)
         win.end_button.pack(side="left", padx=(2, 8))
         win.range_from = tk.StringVar(value="1")
         win.range_to = tk.StringVar(value="1")
-        win.range_from_spin = tk.Spinbox(controls, from_=1, to=1, width=6, textvariable=win.range_from, state="readonly")
+        spin_style = dict(bg=pal["entry"], fg=pal["text"], buttonbackground=pal["button"],
+                          readonlybackground=pal["entry"], relief="flat", highlightthickness=1,
+                          highlightbackground=pal["border"], insertbackground=pal["text"])
+        win.range_from_spin = tk.Spinbox(controls, from_=1, to=1, width=6,
+                                         textvariable=win.range_from, state="readonly", **spin_style)
         win.range_from_spin.pack(side="left", padx=4)
-        tk.Label(controls, text="—").pack(side="left")
-        win.range_to_spin = tk.Spinbox(controls, from_=1, to=1, width=6, textvariable=win.range_to, state="readonly")
+        tk.Label(controls, text="—", bg=pal["bg"], fg=pal["text"]).pack(side="left")
+        win.range_to_spin = tk.Spinbox(controls, from_=1, to=1, width=6,
+                                       textvariable=win.range_to, state="readonly", **spin_style)
         win.range_to_spin.pack(side="left", padx=4)
 
         def practice():
@@ -945,9 +1017,9 @@ class HudApp:
             win.range_to.set("1")
             self.status("Выбрана вся песня · нажмите «Старт»")
 
-        win.practice_button = tk.Button(controls, text="Ручная практика", command=practice)
+        win.practice_button = self._btn(controls, "Ручная практика", practice)
         win.practice_button.pack(side="left", padx=(8, 4))
-        win.clear_practice_button = tk.Button(controls, text="Вся песня", command=clear_practice)
+        win.clear_practice_button = self._btn(controls, "Вся песня", clear_practice)
         win.clear_practice_button.pack(side="left")
 
         def refresh_map():
@@ -983,6 +1055,8 @@ class HudApp:
         win.attributes("-topmost", True)
         px, py = self.panel.winfo_rootx(), self.panel.winfo_rooty()
         win.geometry("430x320%+d+%d" % (max(20, px + 20), max(20, py + 20)))
+        pal = self.palette
+        win.configure(bg=pal["bg"])
         win._release = None
         cancelled = threading.Event()
         jobs = []
@@ -994,20 +1068,22 @@ class HudApp:
                     if job.get("install") and value:
                         shutil.rmtree(value[0], ignore_errors=True)
         win.bind("<Destroy>", destroyed, add="+")
-        tk.Label(win, text="Настройки Sky HUD", font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=16, pady=(14, 4))
-        win.creator_label = tk.Label(win, text="Создатель: @mafsolin", fg="#777", font=("Segoe UI", 9))
+        tk.Label(win, text="Настройки Sky HUD", font=("Segoe UI", 13, "bold"),
+                 bg=pal["bg"], fg=pal["text"]).pack(anchor="w", padx=16, pady=(14, 4))
+        win.creator_label = tk.Label(win, text="Создатель: @mafsolin", fg=pal["muted"], bg=pal["bg"],
+                                     font=("Segoe UI", 9))
         win.creator_label.pack(anchor="w", padx=16)
         win.repo_label = tk.Label(win, text="Репозиторий: https://github.com/%s" % UPDATE_REPO,
-                                  fg="#777", font=("Segoe UI", 9), anchor="w")
+                                  fg=pal["muted"], bg=pal["bg"], font=("Segoe UI", 9), anchor="w")
         win.repo_label.pack(anchor="w", padx=16, pady=(2, 10))
         win.update_status = tk.Label(win, text="Проверка обновлений ничего не скачивает",
-                                     fg="#777", anchor="w", wraplength=390, justify="left")
+                                     fg=pal["muted"], bg=pal["bg"], anchor="w", wraplength=390, justify="left")
         win.update_status.pack(fill="x", padx=16, pady=(0, 8))
-        buttons = tk.Frame(win)
+        buttons = tk.Frame(win, bg=pal["bg"])
         buttons.pack(anchor="w", padx=16)
-        win.update_button = tk.Button(buttons, text="Проверить обновления")
+        win.update_button = self._btn(buttons, "Проверить обновления", lambda: None)
         win.update_button.pack(side="left")
-        win.install_button = tk.Button(buttons, text="Обновиться", state="disabled")
+        win.install_button = self._btn(buttons, "Обновиться", lambda: None, state="disabled")
         win.install_button.pack(side="left", padx=(8, 0))
 
         def on_ui(callback):
@@ -1026,7 +1102,7 @@ class HudApp:
         def check():
             win.update_button.config(state="disabled", text="Проверяю…")
             win.install_button.config(state="disabled")
-            win.update_status.config(text="Запрос к GitHub…", fg="#777")
+            win.update_status.config(text="Запрос к GitHub…", fg=pal["muted"])
             result = on_ui(lambda value, error: finish_check(value, error))
             def worker():
                 try:
@@ -1045,7 +1121,7 @@ class HudApp:
         def finish_check(release, error):
             win.update_button.config(state="normal", text="Проверить обновления")
             if error:
-                win.update_status.config(text="Не удалось проверить обновления: %s" % error, fg="#b00")
+                win.update_status.config(text="Не удалось проверить обновления: %s" % error, fg=pal["error"])
                 return
             message = update_message(release)
             win._release = release
@@ -1053,17 +1129,17 @@ class HudApp:
             if asset and _version_tuple(release.get("tag_name")) > _version_tuple(APP_VERSION):
                 win.install_button.config(state="normal")
                 message += "\nМожно скачать и установить новую версию."
-            win.update_status.config(text=message, fg="#777")
+            win.update_status.config(text=message, fg=pal["muted"])
 
         def install():
             release = win._release or {}
             asset = _release_asset(release)
             if not asset or not asset.get("browser_download_url"):
-                win.update_status.config(text="В релизе нет пакета обновления", fg="#b00")
+                win.update_status.config(text="В релизе нет пакета обновления", fg=pal["error"])
                 return
             win.update_button.config(state="disabled")
             win.install_button.config(state="disabled", text="Скачиваю…")
-            win.update_status.config(text="Скачивание и проверка пакета…", fg="#777")
+            win.update_status.config(text="Скачивание и проверка пакета…", fg=pal["muted"])
             result = on_ui(lambda value, error: finish_install(value, error))
             result["install"] = True
             def worker():
@@ -1082,58 +1158,63 @@ class HudApp:
             if error:
                 win.update_button.config(state="normal")
                 win.install_button.config(state="normal", text="Обновиться")
-                win.update_status.config(text="Обновление не установлено: %s" % error, fg="#b00")
+                win.update_status.config(text="Обновление не установлено: %s" % error, fg=pal["error"])
                 return
             tmp_dir = value[0]
             try:
                 launch_update(value)
                 for job in jobs:
                     job["install"] = False
-                win.update_status.config(text="Обновление подготовлено. Приложение перезапустится…", fg="#777")
+                win.update_status.config(text="Обновление подготовлено. Приложение перезапустится…", fg=pal["muted"])
                 self.quit()
             except Exception as exc:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
                 win.update_button.config(state="normal")
                 win.install_button.config(state="normal", text="Обновиться")
-                win.update_status.config(text="Не удалось запустить updater: %s" % exc, fg="#b00")
+                win.update_status.config(text="Не удалось запустить updater: %s" % exc, fg=pal["error"])
 
         win.update_button.config(command=check)
         win.install_button.config(command=install)
         return win
 
     def open_catalog(self):
+        pal = self.palette
         win = tk.Toplevel(self.panel)
         win.title("Sky Notes · каталог")
         px, py = self.panel.winfo_rootx(), self.panel.winfo_rooty()
         win.geometry("620x700%+d%+d" % (px, max(20, py-350)))
-        win.configure(bg="#182733")
+        win.configure(bg=pal["bg"])
         win.attributes("-topmost", True)
-        head = tk.Frame(win, bg="#182733", padx=18, pady=16)
+        head = tk.Frame(win, bg=pal["bg"], padx=18, pady=16)
         head.pack(fill="x")
-        title_row = tk.Frame(head, bg="#182733")
+        title_row = tk.Frame(head, bg=pal["bg"])
         title_row.pack(fill="x")
-        tk.Label(title_row, text="Каталог нот", fg="#f5efdf", bg="#182733",
+        tk.Label(title_row, text="Каталог нот", fg=pal["text"], bg=pal["bg"],
                  font=("Segoe UI", 18)).pack(side="left")
-        win.import_button = tk.Button(title_row, text="Загрузить свою песню",
-                                       command=lambda: upload(), font=("Segoe UI", 10),
-                                       bg="#283945", fg="#f5efdf", activebackground="#3e5864",
-                                       activeforeground="#ffffff", relief="flat", padx=12, pady=7)
+        win.import_button = self._btn(title_row, "Загрузить свою песню", lambda: upload(),
+                                      font=("Segoe UI", 10), padx=12, pady=7)
         win.import_button.pack(side="right")
-        tk.Label(head, text="★ — избранное всегда сверху · двойной щелчок — открыть",
-                 fg="#b8c6c9", bg="#182733", font=("Segoe UI", 9)).pack(anchor="w", pady=(5,12))
+        tk.Label(head, text="★ — избранное сверху · двойной щелчок — открыть · Ctrl+V или правый клик — вставить",
+                 fg=pal["muted"], bg=pal["bg"], font=("Segoe UI", 9)).pack(anchor="w", pady=(5, 12))
         q = tk.StringVar()
-        ent = tk.Entry(head, textvariable=q, bg="#283945", fg="#f5efdf",
-                       insertbackground="#f5efdf", relief="flat", font=("Segoe UI", 11))
+        ent = tk.Entry(head, textvariable=q, bg=pal["entry"], fg=pal["text"],
+                       insertbackground=pal["text"], relief="flat", font=("Segoe UI", 11),
+                       highlightthickness=1, highlightbackground=pal["border"],
+                       highlightcolor=pal["accent"])
         ent.pack(fill="x", ipady=8)
-        win.import_status = tk.Label(head, text="", bg="#182733", fg="#b8c6c9",
+        win.catalog_count = tk.Label(head, text="", bg=pal["bg"], fg=pal["muted"],
+                                     anchor="w", font=("Segoe UI", 9))
+        win.catalog_count.pack(fill="x", pady=(4, 0))
+        win.import_status = tk.Label(head, text="", bg=pal["bg"], fg=pal["muted"],
                                      anchor="w", wraplength=560, font=("Segoe UI", 9))
-        win.import_status.pack(fill="x", pady=(5, 0))
-        body = tk.Frame(win, bg="#182733", padx=18, pady=14)
+        win.import_status.pack(fill="x", pady=(2, 0))
+        body = tk.Frame(win, bg=pal["bg"], padx=18, pady=14)
         body.pack(fill="both", expand=True)
         style = ttk.Style(win)
-        style.configure("Sky.Treeview", background="#182733", fieldbackground="#182733",
-                        foreground="#f5efdf", rowheight=32, font=("Segoe UI", 11), borderwidth=0)
-        style.map("Sky.Treeview", background=[("selected", "#3e5864")], foreground=[("selected", "#fff8e9")])
+        style.configure("Sky.Treeview", background=pal["bg"], fieldbackground=pal["bg"],
+                        foreground=pal["text"], rowheight=32, font=("Segoe UI", 11), borderwidth=0)
+        style.map("Sky.Treeview", background=[("selected", pal["select"])],
+                  foreground=[("selected", pal["text"])])
         tree = ttk.Treeview(body, columns=("favorite", "name", "size"), show="", style="Sky.Treeview", selectmode="browse")
         tree.column("favorite", width=40, stretch=False, anchor="center")
         tree.column("name", width=420, minwidth=180)
@@ -1143,15 +1224,58 @@ class HudApp:
         sb.pack(side="right", fill="y")
         tree.configure(yscrollcommand=sb.set)
         win.catalog_tree = tree
+        win.catalog_entry = ent
+        win.catalog_query = q
+        win.catalog_all = []
+        win.catalog_arr = []
 
         def refresh():
-            win.catalog_arr = self.catalog_entries(q.get())
+            matches = self.catalog_entries(q.get())
+            win.catalog_all = matches
+            win.catalog_arr = matches[:self.CATALOG_LIMIT]
             children = tree.get_children()
             if children:
                 tree.delete(*children)
             for i, (name, path, size) in enumerate(win.catalog_arr):
                 star = "★" if song_path_key(path) in self.favorites else "☆"
                 tree.insert("", "end", iid=str(i), values=(star, os.path.splitext(name)[0], "%d KB" % round(size/1024)))
+            total = len(matches)
+            shown = len(win.catalog_arr)
+            if total > shown:
+                win.catalog_count.config(text="Показано %s из %s · печатайте, чтобы найти нужную" % (shown, format(total, ",").replace(",", " ")))
+            else:
+                win.catalog_count.config(text="Найдено: %d" % total)
+
+        def paste_search():
+            try:
+                text = win.clipboard_get()
+            except tk.TclError:
+                return
+            line = next((part.strip() for part in text.splitlines() if part.strip()), "")[:120]
+            if not line:
+                return
+            ent.insert("insert", line)
+            refresh()
+
+        menu = tk.Menu(win, tearoff=0, bg=pal["panel"], fg=pal["text"], bd=0,
+                       activebackground=pal["select"], activeforeground=pal["text"])
+        menu.add_command(label="Вставить", command=paste_search)
+        menu.add_command(label="Копировать", command=lambda: ent.event_generate("<<Copy>>"))
+        menu.add_command(label="Вырезать", command=lambda: ent.event_generate("<<Cut>>"))
+        menu.add_separator()
+        menu.add_command(label="Выделить всё",
+                         command=lambda: (ent.selection_range(0, "end"), ent.icursor("end")))
+        win.catalog_menu = menu
+        win.catalog_paste = paste_search
+
+        def show_menu(event):
+            menu.tk_popup(event.x_root, event.y_root)
+            return "break"
+
+        ent.bind("<Button-3>", show_menu)
+        ent.bind("<Control-v>", lambda e: (paste_search(), "break")[1])
+        ent.bind("<Control-V>", lambda e: (paste_search(), "break")[1])
+        tree.bind("<Button-3>", show_menu)
 
         def upload():
             path = filedialog.askopenfilename(
@@ -1162,16 +1286,14 @@ class HudApp:
             try:
                 dest = self.import_song_file(path)
                 self.load_song_file(dest)
-                q.set("")
-                for i, entry in enumerate(win.catalog_arr):
-                    if entry[1] == dest:
-                        tree.selection_set(str(i))
-                        tree.see(str(i))
-                        break
-                win.import_status.config(text="Добавлено: " + os.path.basename(dest), fg="#b8c6c9")
+                q.set(os.path.splitext(os.path.basename(dest))[0])
+                refresh()
+                tree.selection_set("0")
+                tree.see("0")
+                win.import_status.config(text="Добавлено: " + os.path.basename(dest), fg=pal["muted"])
                 self.status("Своя песня добавлена · нажмите «Старт», чтобы играть")
             except Exception as e:
-                win.import_status.config(text="Ошибка: %s" % e, fg="#ff9999")
+                win.import_status.config(text="Ошибка: %s" % e, fg=pal["error"])
 
         def favorite(event):
             iid = tree.identify_row(event.y)
@@ -1654,6 +1776,16 @@ class HudApp:
         "muted": "#d3deeb", "now": "#ffcf66", "next": "#6edaff",
         "ink": "#101722", "hit": "#fff0be", "wrong": "#ff9999",
     }
+
+    def map_palette(self):
+        """Colours for the song map; highlight gold/cyan stays readable in both themes."""
+        if self.theme == "light":
+            return {"panel": "#ffffff", "edge": "#c9d3e0", "key": "#eef2f7",
+                    "key_edge": "#c2ccda", "text": "#1c2430", "muted": "#5f6b7a",
+                    "now": "#e0a52a", "next": "#2a9dbd", "ink": "#ffffff"}
+        return {"panel": "#101a2a", "edge": "#485b70", "key": "#1d2b3e",
+                "key_edge": "#5c738a", "text": "#ffffff", "muted": "#d3deeb",
+                "now": "#ffcf66", "next": "#6edaff", "ink": "#101722"}
 
     def _redraw(self):
         # полная пересборка элементов (масштаб/песня/партии) в ближайшем кадре
