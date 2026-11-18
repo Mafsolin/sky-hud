@@ -422,7 +422,10 @@ class HudApp:
         self._map_refreshers = []
         self.preview_index = 0
         self.practice_range = None
-        self.theme = system_theme()
+        self.theme_choice = self.cfg.get("theme", "system")
+        if self.theme_choice not in ("system", "light", "dark"):
+            self.theme_choice = "system"
+        self.theme = system_theme() if self.theme_choice == "system" else self.theme_choice
         self.palette = THEMES[self.theme]
 
         # ---- окно HUD: поверх всего, без рамки, без фокуса, клики проходят сквозь
@@ -448,6 +451,7 @@ class HudApp:
         self.panel.configure(bg=self.palette["bg"])
         self.panel.attributes("-topmost", True)
         self.panel.protocol("WM_DELETE_WINDOW", self.quit)
+        self._configure_ttk_theme()
         self._build_panel()
         self.place_panel()
         self._theme_titlebar(self.panel)
@@ -656,6 +660,7 @@ class HudApp:
             "mode": self.mode, "metro": self.metro_on, "sound": self.sound_on,
             "loop": self.loop_on, "parts": sorted(self.part_sel or []),
             "hud_hidden": self.hud_hidden,
+            "theme": self.theme_choice,
             "favorites": sorted(self.favorites),
             "last_song": self.song_path,
         }
@@ -690,6 +695,78 @@ class HudApp:
         window.bind("<Map>", apply, add="+")
         apply()
 
+    def _configure_ttk_theme(self):
+        # Native Windows ttk elements ignore colors; clam paints all elements itself.
+        style = ttk.Style(self.panel)
+        style.theme_use("clam")
+        pal = self.palette
+        style.configure("Sky.Treeview", background=pal["bg"], fieldbackground=pal["bg"],
+                        foreground=pal["text"], rowheight=32, font=("Segoe UI", 11), borderwidth=0,
+                        bordercolor=pal["bg"], lightcolor=pal["bg"])
+        style.map("Sky.Treeview", background=[("selected", pal["select"])],
+                  foreground=[("selected", pal["text"])])
+        style.configure("Sky.Vertical.TScrollbar", background=pal["button"],
+                        troughcolor=pal["bg"], arrowcolor=pal["text"], bordercolor=pal["bg"],
+                        lightcolor=pal["button"], darkcolor=pal["button"], gripcount=0)
+        style.map("Sky.Vertical.TScrollbar", background=[("active", pal["button_active"])],
+                  arrowcolor=[("disabled", pal["muted"])])
+
+    def set_theme(self, choice):
+        if choice not in ("system", "light", "dark"):
+            raise ValueError("Unknown theme: %s" % choice)
+        old = self.palette
+        self.theme_choice = choice
+        self.theme = system_theme() if choice == "system" else choice
+        self.palette = THEMES[self.theme]
+        pal = self.palette
+        self._configure_ttk_theme()
+        # Recolor all classic widgets, including open dialogs and their menus.
+        # Match palette roles by existing value, with explicit widget-specific roles.
+        def recolor(widget):
+            cls = widget.winfo_class()
+            opts = widget.keys()
+            for option in ("background", "foreground", "activebackground", "activeforeground",
+                           "disabledforeground", "selectcolor", "troughcolor", "insertbackground",
+                           "highlightbackground", "highlightcolor"):
+                if option not in opts:
+                    continue
+                try:
+                    value = str(widget.cget(option)).lower()
+                    roles = [key for key in old if old[key].lower() == value]
+                    if roles:
+                        role = roles[0]
+                        if option == "background" and cls in ("Button", "Menubutton"):
+                            role = "button"
+                        if option == "background" and cls == "Entry":
+                            role = "entry"
+                        widget.configure(**{option: pal[role]})
+                except tk.TclError:
+                    pass
+            for child in widget.winfo_children():
+                recolor(child)
+        recolor(self.panel)
+        self.lb_go.configure(bg=pal["accent"], fg=("#182733" if self.theme == "dark" else "#ffffff"))
+        labels = {"system": "Системная", "light": "Светлая", "dark": "Тёмная"}
+        for window in self.panel.winfo_children():
+            if isinstance(window, tk.Toplevel):
+                self._theme_titlebar(window)
+                if hasattr(window, "theme_var"):
+                    window.theme_var.set(labels[choice])
+                    window._theme_palette.clear()
+                    window._theme_palette.update(pal)
+        self._theme_titlebar(self.panel)
+        # The map grid keeps a derived palette; recreate open maps and catalogs.
+        windows = [(w, w.title()) for w in self.panel.winfo_children()
+                   if isinstance(w, tk.Toplevel) and
+                   ("карта песни" in w.title() or "каталог" in w.title())]
+        for win, title in windows:
+            geometry = win.geometry()
+            win.destroy()
+            replacement = self.open_map() if "карта песни" in title else (self.open_catalog() if "каталог" in title else None)
+            if replacement:
+                replacement.geometry(geometry)
+        self.save_cfg()
+
     def _btn(self, parent, text, command, **kw):
         pal = self.palette
         opts = dict(text=text, command=command, bg=pal["button"], fg=pal["text"],
@@ -718,13 +795,19 @@ class HudApp:
                  font=("Segoe UI", 8)).pack(side="right")
         f = tk.Frame(p, bg=pal["bg"])
         f.pack(fill="x", padx=6, pady=(6, 0))
-        self._btn(f, "Каталог нот", self.open_catalog).pack(side="left", padx=2)
-        self._btn(f, "Открыть карту", self.open_map).pack(side="left", padx=2)
-        self.lb_go = self._btn(f, "▶ Старт", self.toggle_run, width=8)
-        self.lb_go.pack(side="left")
-        self.lb_hide = self._btn(f, "Показать HUD" if self.hud_hidden else "Скрыть HUD полностью", self.toggle_hud)
-        self.lb_hide.pack(side="left", padx=(8, 0))
-        self._btn(f, "Настройки", self.open_settings).pack(side="left", padx=(6, 0))
+        self._panel_buttons = [
+            self._btn(f, "Каталог нот", self.open_catalog),
+            self._btn(f, "Открыть карту", self.open_map),
+            self._btn(f, "▶ Старт", self.toggle_run,
+                      bg=pal["accent"], fg=("#182733" if self.theme == "dark" else "#ffffff")),
+            self._btn(f, "Показать HUD" if self.hud_hidden else "Скрыть HUD полностью",
+                      self.toggle_hud, width=23),
+            self._btn(f, "Настройки", self.open_settings),
+        ]
+        for col, button in enumerate(self._panel_buttons):
+            button.grid(row=0, column=col, padx=3, pady=3, sticky="nsew")
+        self.lb_go = self._panel_buttons[2]
+        self.lb_hide = self._panel_buttons[3]
         self.mode_btns = {}
 
         song_row = tk.Frame(p, bg=pal["bg"])
@@ -1072,9 +1155,10 @@ class HudApp:
         body.pack(fill="both", expand=True, padx=10, pady=4)
         grid = SongMapGrid(body, self.map_palette(), CODES, select)
         grid.pack(side="left", fill="both", expand=True)
-        scrollbar = ttk.Scrollbar(body, orient="vertical", command=grid.yview)
+        scrollbar = ttk.Scrollbar(body, orient="vertical", command=grid.yview, style="Sky.Vertical.TScrollbar")
         scrollbar.pack(side="right", fill="y")
         grid.configure(yscrollcommand=scrollbar.set)
+        win.map_scrollbar = scrollbar
         win.map_grid = grid
         win.select_step = select
 
@@ -1179,7 +1263,8 @@ class HudApp:
         win.attributes("-topmost", True)
         px, py = self.panel.winfo_rootx(), self.panel.winfo_rooty()
         win.geometry("430x320%+d+%d" % (max(20, px + 20), max(20, py + 20)))
-        pal = self.palette
+        pal = dict(self.palette)
+        win._theme_palette = pal
         win.configure(bg=pal["bg"])
         self._theme_titlebar(win)
         win._release = None
@@ -1195,6 +1280,19 @@ class HudApp:
         win.bind("<Destroy>", destroyed, add="+")
         tk.Label(win, text="Настройки Sky HUD", font=("Segoe UI", 13, "bold"),
                  bg=pal["bg"], fg=pal["text"]).pack(anchor="w", padx=16, pady=(14, 4))
+        theme_row = tk.Frame(win, bg=pal["bg"])
+        theme_row.pack(fill="x", padx=16, pady=(0, 4))
+        tk.Label(theme_row, text="Тема", bg=pal["bg"], fg=pal["text"]).pack(side="left")
+        choices = {"Системная": "system", "Светлая": "light", "Тёмная": "dark"}
+        labels = {value: key for key, value in choices.items()}
+        win.theme_var = tk.StringVar(value=labels[self.theme_choice])
+        win.theme_menu = tk.OptionMenu(theme_row, win.theme_var, *choices,
+                                       command=lambda value: self.set_theme(choices[value]))
+        win.theme_menu.config(bg=pal["button"], fg=pal["text"], activebackground=pal["button_active"],
+                              activeforeground=pal["text"], relief="flat", highlightthickness=0, bd=0)
+        win.theme_menu["menu"].config(bg=pal["panel"], fg=pal["text"],
+                                      activebackground=pal["select"], activeforeground=pal["text"])
+        win.theme_menu.pack(side="left", padx=8)
         win.creator_label = tk.Label(win, text="Создатель: @mafsolin", fg=pal["muted"], bg=pal["bg"],
                                      font=("Segoe UI", 9))
         win.creator_label.pack(anchor="w", padx=16)
@@ -1350,7 +1448,8 @@ class HudApp:
         body.pack(fill="both", expand=True)
         style = ttk.Style(win)
         style.configure("Sky.Treeview", background=pal["bg"], fieldbackground=pal["bg"],
-                        foreground=pal["text"], rowheight=32, font=("Segoe UI", 11), borderwidth=0)
+                        foreground=pal["text"], rowheight=32, font=("Segoe UI", 11), borderwidth=0,
+                        bordercolor=pal["bg"], lightcolor=pal["bg"])
         style.map("Sky.Treeview", background=[("selected", pal["select"])],
                   foreground=[("selected", pal["text"])])
         tree = ttk.Treeview(body, columns=("favorite", "name", "size"), show="", style="Sky.Treeview", selectmode="browse")
@@ -1358,7 +1457,8 @@ class HudApp:
         tree.column("name", width=420, minwidth=180)
         tree.column("size", width=70, stretch=False, anchor="e")
         tree.pack(side="left", fill="both", expand=True)
-        sb = ttk.Scrollbar(body, command=tree.yview)
+        sb = ttk.Scrollbar(body, command=tree.yview, style="Sky.Vertical.TScrollbar")
+        win.catalog_scrollbar = sb
         sb.pack(side="right", fill="y")
         tree.configure(yscrollcommand=sb.set)
         win.catalog_tree = tree

@@ -50,6 +50,81 @@ class HudTests(unittest.TestCase):
         hud.APP_DIR = self.original_app_dir
         self.tmp.cleanup()
 
+    def test_theme_live_persistence_and_system(self):
+        for theme, dark in (("light", 0), ("dark", 1)):
+            self.app.set_theme(theme)
+            self.root.update()
+            self.assertEqual(self.app.palette, hud.THEMES[theme])
+            self.assertEqual(self.app.panel.cget("bg"), hud.THEMES[theme]["bg"])
+            self.assertEqual(self._titlebar_dark(self.app.panel), dark)
+            self.assertEqual(json.loads(self.cfg.read_text(encoding="utf-8"))["theme"], theme)
+        with patch.object(hud, "system_theme", return_value="light") as system:
+            self.app.set_theme("system")
+            self.assertEqual(self.app.theme, "light")
+            system.assert_called_once()
+        self.assertEqual(json.loads(self.cfg.read_text(encoding="utf-8"))["theme"], "system")
+
+    def test_settings_theme_menu_changes_all_open_windows(self):
+        self.app.set_theme("light")
+        self.app.set_song(hud.parse_song('{"songNotes":[{"time":0,"key":"1Key0"}]}'))
+        catalog = self.app.open_catalog()
+        mapwin = self.app.open_map()
+        settings = self.app.open_settings()
+        self.root.update()
+        settings.theme_menu["menu"].invoke(2)
+        self.root.update()
+        self.assertEqual(self.app.theme, "dark")
+        self.assertEqual(settings.theme_var.get(), "Тёмная")
+        self.assertEqual(settings.cget("bg"), hud.THEMES["dark"]["bg"])
+        self.assertEqual(self._titlebar_dark(settings), 1)
+        self.assertFalse(catalog.winfo_exists())
+        self.assertFalse(mapwin.winfo_exists())
+        windows = [w for w in self.app.panel.winfo_children() if isinstance(w, tk.Toplevel)]
+        for title in ("каталог", "карта песни"):
+            win = next(w for w in windows if title in w.title())
+            self.assertEqual(win.cget("bg"), hud.THEMES["dark"]["bg"])
+            self.assertEqual(self._titlebar_dark(win), 1)
+
+    def test_panel_grid_spacing_height_and_stable_toggle(self):
+        self.root.update()
+        buttons = self.app._panel_buttons
+        before = self.app.panel.winfo_width(), self.app.panel.winfo_rootx()
+        heights = [b.winfo_height() for b in buttons]
+        gaps = [b.winfo_x() - (a.winfo_x() + a.winfo_width()) for a,b in zip(buttons, buttons[1:])]
+        self.assertLessEqual(max(heights) - min(heights), 2)
+        self.assertLessEqual(max(gaps) - min(gaps), 2)
+        self.assertTrue(all(b.winfo_rootx() + b.winfo_width() <= before[1] + before[0] for b in buttons))
+        self.app.lb_hide.invoke()
+        self.root.update()
+        self.assertLessEqual(abs(self.app.panel.winfo_width() - before[0]), 2)
+        self.assertEqual(self.app.panel.winfo_rootx(), before[1])
+        self.app.lb_hide.invoke()
+        self.root.update()
+        self.assertLessEqual(abs(self.app.panel.winfo_width() - before[0]), 2)
+
+    def test_catalog_few_favorites_and_scrollbars_follow_both_palettes(self):
+        from tkinter import ttk
+        path = str(Path(hud.APP_DIR) / "songs/Songs/A/alpha.txt")
+        self.app.favorites = {hud.song_path_key(path)}
+        self.app.set_theme("dark")
+        win = self.app.open_catalog()
+        self.root.update()
+        self.assertEqual(len(win.catalog_tree.get_children()), 1)
+        style = ttk.Style(win)
+        self.assertEqual(style.lookup("Sky.Treeview", "fieldbackground"), hud.THEMES["dark"]["bg"])
+        self.assertEqual(style.lookup("Sky.Treeview", "background"), hud.THEMES["dark"]["bg"])
+        self.assertEqual(style.lookup("Sky.Vertical.TScrollbar", "troughcolor"), hud.THEMES["dark"]["bg"])
+        self.assertEqual(style.lookup("Sky.Vertical.TScrollbar", "arrowcolor"), hud.THEMES["dark"]["text"])
+        self.assertEqual(win.catalog_scrollbar.cget("style"), "Sky.Vertical.TScrollbar")
+        self.app.set_song(hud.parse_song('{"songNotes":[{"time":0,"key":"1Key0"}]}'))
+        mapwin = self.app.open_map()
+        self.assertEqual(mapwin.map_scrollbar.cget("style"), "Sky.Vertical.TScrollbar")
+        self.app.set_theme("light")
+        self.root.update()
+        self.assertEqual(style.lookup("Sky.Vertical.TScrollbar", "troughcolor"), hud.THEMES["light"]["bg"])
+        self.assertEqual(style.lookup("Sky.Vertical.TScrollbar", "background"), hud.THEMES["light"]["button"])
+        self.assertEqual(style.lookup("Sky.Treeview", "fieldbackground"), hud.THEMES["light"]["bg"])
+
     def test_missing_songs_points_to_separate_songs_archive(self):
         empty = Path(self.tmp.name) / "app-only"
         empty.mkdir()
@@ -233,7 +308,7 @@ class HudTests(unittest.TestCase):
                 try:
                     self.assertEqual(app2.theme, theme)
                     self.assertEqual(app2.panel.cget("bg"), hud.THEMES[theme]["bg"])
-                    self.assertEqual(app2.lb_go.cget("bg"), hud.THEMES[theme]["button"])
+                    self.assertEqual(app2.lb_go.cget("bg"), hud.THEMES[theme]["accent"])
                     self.root.update()
                     self.assertEqual(self._titlebar_dark(app2.panel), 1 if theme == "dark" else 0)
                     win = app2.open_catalog()
