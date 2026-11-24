@@ -1230,6 +1230,55 @@ class HudTests(unittest.TestCase):
             win.destroy()
             self.root.update()
 
+    def test_map_practice_spinboxes_accept_typed_numbers(self):
+        notes = ",".join('{"time":%d,"key":"1Key0"}' % (i * 100) for i in range(25))
+        path = Path(self.tmp.name) / "typed_range.txt"
+        path.write_text('{"songNotes":[%s]}' % notes, encoding="utf-8")
+        self.app.load_song_file(str(path))
+        win = self.app.open_map()
+        win.geometry("900x680+10000+10000")
+        try:
+            self.root.update()
+            self.assertEqual(str(win.range_from_spin.cget("state")), "normal")
+            win.range_from_spin.delete(0, "end")
+            win.range_from_spin.insert(0, "7")
+            win.range_to_spin.delete(0, "end")
+            win.range_to_spin.insert(0, "12")
+            win.practice_button.invoke()
+            self.root.update()
+            self.assertEqual(self.app.practice_range, (6, 11))
+            self.assertEqual(self.app.mode, "step")
+            self.assertEqual(win.range_from.get(), "7")
+            self.assertEqual(win.range_to.get(), "12")
+        finally:
+            win.destroy()
+            self.app.stop()
+
+    def test_map_start_here_practices_from_selected_step_to_end(self):
+        notes = ",".join('{"time":%d,"key":"1Key0"}' % (i * 100) for i in range(25))
+        path = Path(self.tmp.name) / "from_here.txt"
+        path.write_text('{"songNotes":[%s]}' % notes, encoding="utf-8")
+        self.app.load_song_file(str(path))
+        win = self.app.open_map()
+        win.geometry("900x680+10000+10000")
+        try:
+            self.root.update()
+            win.select_step(10)
+            self.root.update()
+            self.assertGreater(win.start_here_button.winfo_rootx(),
+                               win.clear_practice_button.winfo_rootx())
+            win.start_here_button.invoke()
+            self.root.update()
+            self.assertEqual(self.app.practice_range, (10, 24))
+            self.assertIsNotNone(self.app.run)
+            self.assertEqual(self.app.run["mode"], "step")
+            self.assertEqual(len(self.app.run["tl"]["evs"]), 15)
+            self.assertEqual([n["key"] for n in self.app.run["tl"]["evs"][0]["notes"]],
+                             [n["key"] for n in self.app.preview_tl["evs"][10]["notes"]])
+        finally:
+            win.destroy()
+            self.app.stop()
+
     def test_open_map_reuses_one_window(self):
         self.app.load_demo()
         win = self.app.open_map()

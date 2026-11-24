@@ -39,7 +39,7 @@ import sky_updater
 from sky_song_map import SongMapGrid
 
 APP_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
-APP_VERSION = "1.1.11"
+APP_VERSION = "1.1.12"
 UPDATE_REPO = "Mafsolin/sky-hud"
 
 
@@ -1267,12 +1267,30 @@ class HudApp:
                           readonlybackground=pal["entry"], relief="flat", highlightthickness=1,
                           highlightbackground=pal["border"], insertbackground=pal["text"])
         win.range_from_spin = tk.Spinbox(controls, from_=1, to=1, width=6,
-                                         textvariable=win.range_from, state="readonly", **spin_style)
+                                         textvariable=win.range_from, state="normal",
+                                         justify="center", **spin_style)
         win.range_from_spin.pack(side="left", padx=4)
         tk.Label(controls, text="—", bg=pal["bg"], fg=pal["text"]).pack(side="left")
         win.range_to_spin = tk.Spinbox(controls, from_=1, to=1, width=6,
-                                       textvariable=win.range_to, state="readonly", **spin_style)
+                                       textvariable=win.range_to, state="normal",
+                                       justify="center", **spin_style)
         win.range_to_spin.pack(side="left", padx=4)
+
+        def normalize_spin(var):
+            total = len(rows())
+            try:
+                value = int(float(str(var.get()).replace(",", ".")))
+            except (TypeError, ValueError):
+                value = 1
+            value = max(1, min(value, max(1, total)))
+            var.set(str(value))
+            return value
+
+        for spin, var in ((win.range_from_spin, win.range_from),
+                          (win.range_to_spin, win.range_to)):
+            spin.bind("<Return>", lambda event, v=var: (normalize_spin(v), "break")[1])
+            spin.bind("<KP_Enter>", lambda event, v=var: (normalize_spin(v), "break")[1])
+            spin.bind("<FocusOut>", lambda event, v=var: normalize_spin(v))
 
         def practice():
             try:
@@ -1303,10 +1321,29 @@ class HudApp:
             win.range_to.set("1")
             self.status("Выбрана вся песня · нажмите «Старт»")
 
+        def start_from_here():
+            total = len(rows())
+            if not total:
+                return
+            start = max(0, min(self.preview_index, total - 1))
+            end = total - 1
+            range_state["start"], range_state["end"] = start, end
+            win.pick_mode = None
+            set_pick_buttons()
+            self.practice_range = (start, end)
+            self.mode = "step"
+            select(start)
+            win.range_from.set(str(start + 1))
+            win.range_to.set(str(end + 1))
+            self.start()
+            self.status("Практика с хода %d до конца · нажимайте клавиши" % (start + 1))
+
         win.practice_button = self._btn(controls, "Ручная практика", practice)
         win.practice_button.pack(side="left", padx=(8, 4))
         win.clear_practice_button = self._btn(controls, "Вся песня", clear_practice)
         win.clear_practice_button.pack(side="left")
+        win.start_here_button = self._btn(controls, "Начать отсюда", start_from_here)
+        win.start_here_button.pack(side="left", padx=(4, 0))
 
         def refresh_map():
             current = rows()
